@@ -228,7 +228,7 @@ def run_bai9():
     cons=[cp.sum(xA+xH)<=30000,NJ>=0,
           cp.multiply(cp.multiply(c1,risk),xA)<=cp.multiply(d1,xH)]
     prob=cp.Problem(cp.Maximize(cp.sum(NJ)),cons)
-    prob.solve(solver=cp.GLPK)
+    prob.solve(solver=cp.CLARABEL)
     nj=cp.multiply(a1,xA).value+cp.multiply(b1,xH).value-cp.multiply(cp.multiply(c1,risk),xA).value
     return {"sectors":sectors,"xA":xA.value,"xH":xH.value,"nj":nj,
             "total":nj.sum() if nj is not None else 0}
@@ -676,7 +676,11 @@ def page_bai7():
         with st.spinner("Đang chạy NSGA-II..."):
             try:
                 from pymoo.core.problem import ElementwiseProblem
-                from pymoo.algorithms.moo.nsga2 import NSGA2
+                try:
+                     from pymoo.algorithms.moo.nsga2 import NSGA2
+                     PYMOO_OK=True
+                except:
+                     PYMOO_OK=False
                 from pymoo.optimize import minimize as pmin
                 class VNProb(ElementwiseProblem):
                     def __init__(self):
