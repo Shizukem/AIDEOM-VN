@@ -1,3 +1,4 @@
+
 import streamlit as st
 import numpy as np
 import pandas as pd
@@ -119,14 +120,13 @@ def run_bai3():
     labor =np.array([13.20,11.50,4.80,.30,7.80,.55,1.95,.62,2.15,.75])
     ai_r  =np.array([15,55,20,30,48,72,42,88,38,45],float)
     risk  =np.array([18,42,25,55,38,52,35,28,22,18],float)
-    priority = np.array([0.95,0.90,0.88,0.84,0.80,0.76,0.72,0.68,0.64,0.60])
     def nm(x): return (x-x.min())/(x.max()-x.min()+1e-9)
     def nb(x): return (x.max()-x)/(x.max()-x.min()+1e-9)
     w=np.array([.15,.15,.20,.15,.10,.20,.15])
     cols=[nm(growth),nm(prod),nm(spill),nm(expo),nm(labor),nm(ai_r),nb(risk)]
     P=sum(c*w[i] for i,c in enumerate(cols))
     order=np.argsort(-P)
-    return {"names":names,"priority": priority,"order":order,"growth":growth,
+    return {"names":names,"priority":P,"order":order,"growth":growth,
             "ai_r":ai_r,"risk":risk}
 
 @st.cache_data
@@ -220,19 +220,26 @@ def run_bai9():
     L=np.array([13.20,11.50,4.80,7.80,.55,1.95,.62,2.15])
     risk=np.array([18,42,25,38,52,35,28,22])/100
     a1=np.array([8.5,32.5,12.8,22.4,45.8,28.5,62.5,18.5])
+    a2=np.array([12.0,18.5,8.5,15.2,12.5,16.8,15.0,22.0])
     b1=np.array([45.,28.,35.,32.,22.,30.,20.,55.])
     c1=np.array([5.2,62.4,18.5,48.2,72.5,42.8,32.5,12.5])
     d1=np.array([50.,32.,42.,38.,26.,36.,24.,62.])
+
+    BUDGET = 30000.
+    # Giới hạn phân bổ tối đa mỗi ngành theo tỷ trọng lao động (tối thiểu 5% ngân sách)
+    share = L / L.sum()
+    cap = np.maximum(share, 0.05) * BUDGET
+
     xA=cp.Variable(8,nonneg=True); xH=cp.Variable(8,nonneg=True)
-    NJ=cp.multiply(a1,xA)+cp.multiply(b1,xH)-cp.multiply(cp.multiply(c1,risk),xA)
-    cons=[cp.sum(xA+xH)<=30000,NJ>=0,
-          cp.multiply(cp.multiply(c1,risk),xA)<=cp.multiply(d1,xH)]
+    NJ=cp.multiply(a1,xA)+cp.multiply(a2,xH)+cp.multiply(b1,xH)-cp.multiply(cp.multiply(c1,risk),xA)
+    cons=[cp.sum(xA+xH)<=BUDGET, NJ>=0,
+          cp.multiply(cp.multiply(c1,risk),xA)<=cp.multiply(d1,xH),
+          (xA+xH)<=cap]
     prob=cp.Problem(cp.Maximize(cp.sum(NJ)),cons)
     prob.solve(solver=cp.GLPK)
-    nj=cp.multiply(a1,xA).value+cp.multiply(b1,xH).value-cp.multiply(cp.multiply(c1,risk),xA).value
+    nj=cp.multiply(a1,xA).value+cp.multiply(a2,xH).value+cp.multiply(b1,xH).value-cp.multiply(cp.multiply(c1,risk),xA).value
     return {"sectors":sectors,"xA":xA.value,"xH":xH.value,"nj":nj,
             "total":nj.sum() if nj is not None else 0}
-
 @st.cache_data
 def run_bai10():
     import pyomo.environ as pyo
@@ -316,43 +323,20 @@ def run_bai12():
     DK,DD,DAI=.05,.12,.15; THa=.8; MU=.02
     ph1,ph2,ph3=.003,.002,.004
     BUDGET=1200.
-    gdp_paths = {}
-    kpi = {}
-
-    for sk, si in scens.items():
-
-        r = si["r"]
-        K, L, D, AI, H, A = K0b, L0b, D0b, AI0b, H0b, A0
-
-        path = []
-
+    gdp_paths={}; kpi={}
+    for sk,si in scens.items():
+        r=si["r"]; K,L,D,AI,H,A=K0b,L0b,D0b,AI0b,H0b,A0
+        path=[]
         for _ in range(5):
-            Y = A*K**.33*L**.42*D**.10*AI**.08*H**.07
+            Y=A*K**.33*L**.42*D**.10*AI**.08*H**.07
             path.append(Y)
-
-            K  = (1-DK)*K + r["K"]*BUDGET
-            D  = min((1-DD)*D + r["D"]*BUDGET/500, 50.)
-            AI = (1-DAI)*AI + r["AI"]*BUDGET/15
-            H  = float(np.clip(
-                    H + THa*r["H"]*BUDGET/300 - MU*H,
-                    5,65
-                 ))
-
-            A = A*(1 + ph1*D + ph2*AI + ph3*H)
-
-        Yf = A*K**.33*L**.42*D**.10*AI**.08*H**.07
+            K=(1-DK)*K+r["K"]*BUDGET
+            D=min((1-DD)*D+r["D"]*BUDGET/500,50.)
+            AI=(1-DAI)*AI+r["AI"]*BUDGET/15
+            H=float(np.clip(H+THa*r["H"]*BUDGET/300-MU*H,5,65))
+            A=A*(1+ph1*D+ph2*AI+ph3*H)
+        Yf=A*K**.33*L**.42*D**.10*AI**.08*H**.07
         path.append(Yf)
-
-        D30 = D
-        AI30 = AI
-
-        gdp_paths[sk] = path
-
-        cagr = (Yf/path[0])**(1/5)-1
-
-        D30 = D
-        AI30 = AI
-        H30 = H
         gdp_paths[sk]=path
         cagr=(Yf/path[0])**(1/5)-1
         # M4 labor
@@ -382,7 +366,10 @@ def run_bai12():
         rt=X5.sum(1); f2=np.abs(rt-rt.mean()).mean()
         f3=(er*(X5[:,0]+X5[:,2])).sum()
         f4=(rh*X5[:,2]).sum()-(sg*X5[:,3]).sum()
-        kpi[sk]={"name":si["name"],"col":si["col"],"r":r,"Y30":path[-1],"CAGR":cagr*100,"D30":D30,"AI30":AI30,"H30":H30,"nj_tot":nj.sum(),"nj_pos":int((nj>=0).sum()),"f1":f1,"f2":f2,"f3":f3,"f4":f4}
+        kpi[sk]={"name":si["name"],"col":si["col"],"r":r,
+                 "Y30":path[-1],"CAGR":cagr*100,"D30":D,"AI30":AI,
+                 "nj_tot":nj.sum(),"nj_pos":int((nj>=0).sum()),
+                 "f1":f1,"f2":f2,"f3":f3,"f4":f4}
     m2r=run_bai6()
     return {"alloc":alloc,"regions":regions,"items":items,"scens":scens,
             "gdp_paths":gdp_paths,"kpi":kpi,"m2":m2r,"Zstar":pulp.value(m.objective)}
@@ -393,7 +380,7 @@ def run_bai12():
 
 def page_home():
     st.markdown("# 🇻🇳 AIDEOM-VN")
-    st.markdown("### AI-Driven Decision Optimization Model for Vietnam")
+    st.markdown("### *AI-Driven Decision Optimization Model for Vietnam*")
     st.caption("Web app giải 12 bài toán mô hình ra quyết định phát triển kinh tế Việt Nam trong kỉ nguyên AI — dữ liệu thực 2020-2025.")
     st.divider()
     c1,c2,c3,c4=st.columns(4)
@@ -403,47 +390,32 @@ def page_home():
     pcard("GDP/người 2025","5.026 USD","↑ +6,9%",c4)
     st.divider()
     section("📚 12 bài toán theo 4 cấp độ")
-    levels = {
-    "🟢 Cấp độ DỄ — Làm quen mô hình": [
-        ("Bài 1", "Hàm sản xuất Cobb-Douglas mở rộng + AI",
-         "Growth accounting, dự báo GDP 2030"),
-        ("Bài 2", "LP phân bổ ngân sách 4 hạng mục",
-         "scipy.optimize, shadow price"),
-        ("Bài 3", "Chỉ số ưu tiên 10 ngành",
-         "Min-max norm, weighted scoring, sensitivity"),
-    ],
-
-    "🟡 Cấp độ TRUNG BÌNH — Tối ưu cổ điển": [
-        ("Bài 4", "LP ngành-vùng đầy đủ",
-         "PuLP + CVXPY, 24 biến, ràng buộc công bằng"),
-        ("Bài 5", "MIP 15 dự án chuyển đổi số",
-         "Binary vars, precedence, loại trừ"),
-        ("Bài 6", "TOPSIS 6 vùng kinh tế",
-         "Entropy weights, sensitivity"),
-    ],
-
-    "🟠 Cấp độ KHÁ KHÓ — Tối ưu nâng cao": [
-        ("Bài 7", "Pareto đa mục tiêu NSGA-II",
-         "pymoo, 4 mục tiêu, Pareto front 3D"),
-        ("Bài 8", "Tối ưu động 2026-2035",
-         "CVXPY / SLSQP, Bellman, cú sốc"),
-        ("Bài 9", "Mô phỏng lao động & AI",
-         "NetJob ròng, Sankey, ngưỡng đào tạo"),
-    ],
-
-    "🔴 Cấp độ KHÓ — Hệ thống tích hợp": [
-        ("Bài 10", "Stochastic LP hai giai đoạn",
-         "Pyomo, VSS, EVPI, Robust opt"),
-        ("Bài 11", "Q-learning chính sách kinh tế",
-         "MDP, ε-greedy, DQN comparison"),
-        ("Bài 12", "AIDEOM-VN tích hợp",
-         "6 module, 5 kịch bản, dashboard"),
-    ]
-}
+    levels={
+        "🟢 Cấp độ DỄ — Làm quen mô hình":[
+            ("Bài 1","Hàm sản xuất Cobb-Douglas mở rộng + AI","Growth accounting, dự báo GDP 2030"),
+            ("Bài 2","LP phân bổ ngân sách 4 hạng mục","scipy.optimize, shadow price"),
+            ("Bài 3","Chỉ số ưu tiên 10 ngành","Min-max norm, weighted scoring, sensitivity"),
+        ],
+        "🟡 Cấp độ TRUNG BÌNH — Tối ưu cố điển":[
+            ("Bài 4","LP ngành-vùng đầy đủ","PuLP + CVXPY, 24 biến, ràng buộc công bằng"),
+            ("Bài 5","MIP 15 dự án chuyển đổi số","Binary vars, precedence, loại trừ"),
+            ("Bài 6","TOPSIS 6 vùng kinh tế","Entropy weights, sensitivity"),
+        ],
+        "🟠 Cấp độ KHÁ KHÓ — Tối ưu nâng cao":[
+            ("Bài 7","Pareto đa mục tiêu NSGA-II","pymoo, 4 mục tiêu, Pareto front 3D"),
+            ("Bài 8","Tối ưu động 2026-2035","CVXPY / SLSQP, Bellman, cú sốc"),
+            ("Bài 9","Mô phỏng lao động & AI","NetJob ròng, Sankey, ngưỡng đào tạo"),
+        ],
+        "🔴 Cấp độ KHÓ — Hệ thống tích hợp":[
+            ("Bài 10","Stochastic LP hai giai đoạn","Pyomo, VSS, EVPI, Robust opt"),
+            ("Bài 11","Q-learning chính sách kinh tế","MDP, ε-greedy, DQN comparison"),
+            ("Bài 12","AIDEOM-VN tích hợp","6 module, 5 kịch bản, dashboard"),
+        ],
+    }
     for lv, lst in levels.items():
         with st.expander(lv, expanded=True):
             for bai,tit,sub in lst:
-                st.markdown(f"*{bai}* &nbsp;&nbsp; {tit}  \n<small style='color:#aaa'>{sub}</small>",
+                st.markdown(f"**{bai}** &nbsp;&nbsp; {tit}  \n<small style='color:#aaa'>{sub}</small>",
                             unsafe_allow_html=True)
 
 def page_bai1():
@@ -489,93 +461,32 @@ def page_bai1():
     st.plotly_chart(fig3,use_container_width=True)
 
 def page_bai2():
-
     section("Bài 2 — LP phân bổ ngân sách số 4 hạng mục")
-
-    try:
-        d = run_bai2()
-
-        c1,c2,c3 = st.columns(3)
-
-        pcard(
-            "Z* (GDP tăng thêm)",
-            f"{d['Z']:.2f} ng.tỷ",
-            "B = 100 ng.tỷ",
-            c1
-        )
-
-        pcard(
-            "Shadow price ngân sách",
-            f"{abs(float(d['sp'])):.4f}",
-            "(GDP/ng.tỷ đầu tư thêm)",
-            c2
-        )
-
-        lbl = [
-            "x1 Hạ tầng",
-            "x2 AI & Dữ liệu",
-            "x3 Nhân lực",
-            "x4 R&D"
-        ]
-
-        pcard(
-            "Phân bổ tối ưu",
-            " | ".join(
-                f"{lbl[i]}:{d['x'][i]:.0f}"
-                for i in range(4)
-            ),
-            "",
-            c3
-        )
-
-        st.divider()
-
-        col1,col2 = st.columns(2)
-
-        with col1:
-
-            fig = go.Figure()
-
-            fig.add_bar(
-                x=lbl,
-                y=d["x"]
-            )
-
-            fig.update_layout(
-                template="plotly_dark",
-                height=340
-            )
-
-            st.plotly_chart(
-                fig,
-                use_container_width=True,
-                key="bai2_bar"
-            )
-
-        with col2:
-
-            fig2 = go.Figure()
-
-            fig2.add_scatter(
-                x=d["Bs"],
-                y=d["Zs"],
-                mode="lines+markers"
-            )
-
-            fig2.update_layout(
-                template="plotly_dark",
-                height=340
-            )
-
-            st.plotly_chart(
-                fig2,
-                use_container_width=True,
-                key="bai2_line"
-            )
-
-    except Exception as e:
-        st.error(str(e))
-        st.exception(e)
+    with st.spinner("Giải LP..."):
+        d=run_bai2()
+    c1,c2,c3=st.columns(3)
+    pcard("Z* (GDP tăng thêm)",f"{d['Z']:.2f} ng.tỷ","B = 100 ng.tỷ",c1)
+    pcard("Shadow price ngân sách",f"{abs(d['sp']):.4f}","(GDP/ng.tỷ đầu tư thêm)",c2)
+    lbl=["x₁ Hạ tầng","x₂ AI & Dữ liệu","x₃ Nhân lực","x₄ R&D"]
+    pcard("Phân bổ tối ưu",
+          " | ".join(f"{lbl[i]}:{d['x'][i]:.0f}" for i in range(4)),"",c3)
+    st.divider()
+    col1,col2=st.columns(2)
+    with col1:
+        section("Phân bổ tối ưu (ng.tỷ VND)")
+        fig=go.Figure(go.Bar(x=lbl,y=d["x"],
+            marker_color=["#3498db","#9b59b6","#27ae60","#e74c3c"],
+            text=[f"{v:.1f}" for v in d["x"]],textposition="outside"))
+        fig.update_layout(template="plotly_dark",height=340,yaxis_title="ng.tỷ VND")
+        st.plotly_chart(fig,use_container_width=True)
+    with col2:
+        section("Đường cong Z*(B) — Độ nhạy ngân sách")
+        fig2=go.Figure(go.Scatter(x=d["Bs"],y=d["Zs"],mode="lines+markers",
+            line=dict(color="#e74c3c",width=2.5),marker=dict(size=8)))
+        fig2.update_layout(template="plotly_dark",height=340,
+                           xaxis_title="Ngân sách B (ng.tỷ VND)",
+                           yaxis_title="Z* (ng.tỷ VND)")
+        st.plotly_chart(fig2,use_container_width=True)
 
 def page_bai3():
     section("Bài 3 — Chỉ số ưu tiên 10 ngành Việt Nam")
@@ -628,7 +539,6 @@ def page_bai5():
     section("Bài 5 — MIP lựa chọn dự án chuyển đổi số")
     with st.spinner("Giải MIP..."):
         d=run_bai5()
-    st.write(d)
     c1,c2,c3=st.columns(3)
     pcard("Z* (Tổng NPV)",f"{d['Z']:,.0f} tỷ VND","",c1)
     pcard("Số dự án chọn",f"{len(d['sel'])}/15","7 ≤ n ≤ 11",c2)
@@ -755,7 +665,7 @@ def page_bai8():
                     A=A*(1+ph1*D+ph2*AI+ph3*H)
                 return Yp
             def obj(z):
-                _, _, _, _, C = unpack(z)
+                _,_,_,_,C=unpack(z)
                 return -sum(rho**t*np.log(max(C[t],1e-6)) for t in range(T))
             def cons_fn(z):
                 IK,ID,IAI,IH,C=unpack(z); Yp=sim(z)
@@ -844,10 +754,10 @@ def page_bai10():
                               yaxis_title="Phân bổ (tỷ VND)",
                               title="Quyết định First-Stage (Here-and-Now)")
             st.plotly_chart(fig,use_container_width=True)
-            st.info(f"*VSS = {d['VSS']:,.0f} tỷ:* Nếu dùng SP thay EV sẽ tăng thêm {d['VSS']:,.0f} tỷ GDP gain  \n"
-                    f"*EVPI = {d['EVPI']:,.0f} tỷ:* Giá trị tối đa nên đầu tư vào dự báo kinh tế")
+            st.info(f"**VSS = {d['VSS']:,.0f} tỷ:** Nếu dùng SP thay EV sẽ tăng thêm {d['VSS']:,.0f} tỷ GDP gain  \n"
+                    f"**EVPI = {d['EVPI']:,.0f} tỷ:** Giá trị tối đa nên đầu tư vào dự báo kinh tế")
         except Exception as e:
-            st.error(f"Lỗi Pyomo/GLPK: {e}. Kiểm tra apt-get install glpk-utils.")
+            st.error(f"Lỗi Pyomo/GLPK: {e}. Kiểm tra `apt-get install glpk-utils`.")
 
 def page_bai11():
     section("Bài 11 — Q-learning chính sách kinh tế thích nghi")
