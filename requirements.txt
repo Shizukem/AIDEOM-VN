@@ -8,6 +8,7 @@ cvxpy
 ecos
 osqp
 scs
-pyomo
+pymoo==0.6.1.3
+numpy<2
 deap
 openpyxl
