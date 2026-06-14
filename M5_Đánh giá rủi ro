@@ -1,0 +1,1130 @@
+Bài 7 (đa mục tiêu) + Bài 10 (SP) 
+
+import numpy as np
+
+# --- Tên vùng và hạng mục ---
+REGIONS = [
+    'Trung du miền núi\nphía Bắc',
+    'Đồng bằng\nsông Hồng',
+    'Bắc Trung Bộ +\nDH Trung Bộ',
+    'Tây Nguyên',
+    'Đông Nam Bộ',
+    'Đồng bằng\nsông Cửu Long'
+]
+REGIONS_SHORT = ['TDMNPB', 'ĐBSH', 'BTB+DHMT', 'TN', 'ĐNB', 'ĐBSCL']
+ITEMS = ['I (Hạ tầng số)', 'D (CĐS DN)', 'AI', 'H (Nhân lực số)']
+ITEMS_SHORT = ['I', 'D', 'AI', 'H']
+
+# --- Ma trận hệ số tác động biên β_{j,r} (Bảng 4.3) ---
+# Hàng = 6 vùng, Cột = 4 hạng mục [I, D, AI, H]
+BETA = np.array([
+    [1.15, 0.85, 0.55, 1.30],  # Trung du miền núi phía Bắc
+    [0.95, 1.25, 1.40, 1.05],  # Đồng bằng sông Hồng
+    [1.05, 0.95, 0.85, 1.15],  # Bắc Trung Bộ + DH Trung Bộ
+    [1.20, 0.75, 0.45, 1.35],  # Tây Nguyên
+    [0.90, 1.30, 1.55, 1.00],  # Đông Nam Bộ
+    [1.10, 0.85, 0.65, 1.25],  # Đồng bằng sông Cửu Long
+])
+
+# --- Chỉ số số hóa ban đầu D_r (Bảng 4.3) ---
+D0 = np.array([38, 78, 55, 32, 82, 48])
+
+# --- Tham số bổ sung Bài 7 (Bảng 7.3) ---
+# e_r: hệ số cường độ phát thải CO2 (tấn CO2 / tỷ VND đầu tư)
+E_R = np.array([0.42, 0.55, 0.48, 0.32, 0.62, 0.38])
+
+# rho_r: hệ số rủi ro dữ liệu từ đầu tư AI
+RHO_R = np.array([0.18, 0.45, 0.28, 0.12, 0.52, 0.22])
+
+# sigma_r: hệ số giảm thiểu rủi ro từ đầu tư nhân lực
+SIGMA_R = np.array([0.32, 0.28, 0.30, 0.35, 0.25, 0.30])
+
+# --- Tham số ràng buộc ---
+BUDGET_TOTAL = 50_000   # tỷ VND (C1)
+BUDGET_MIN_R  = 5_000   # sàn mỗi vùng (C2)
+BUDGET_MAX_R  = 12_000  # trần mỗi vùng (C3)
+BUDGET_H_MIN  = 12_000  # sàn nhân lực số tổng (C4)
+GAMMA_FAIR    = 0.002   # hệ số cập nhật số hóa (C5)
+LAMBDA_FAIR   = 0.7     # ngưỡng công bằng (C5)
+
+# --- Kích thước bài toán ---
+N_REGIONS = 6
+N_ITEMS   = 4
+N_VAR      = N_REGIONS * N_ITEMS  # 24 biến quyết định
+
+print("=" * 70)
+print("BÀI 7: TỐI ƯU ĐA MỤC TIÊU PARETO VỚI NSGA-II")
+print("       Phân bổ ngân sách số Việt Nam 2024")
+print("=" * 70)
+print(f"\nSố biến quyết định : {N_VAR} (6 vùng × 4 hạng mục)")
+print(f"Số mục tiêu        : 4 (f1 max GDP, f2 min Gini, f3 min CO2, f4 min Risk)")
+print(f"Ngân sách tổng     : {BUDGET_TOTAL:,.0f} tỷ VND")
+def decode(x):
+    """Chuyển vector 1D (24,) thành ma trận X (6, 4)"""
+    return x.reshape(N_REGIONS, N_ITEMS)
+
+
+def objectives(x):
+    """
+    Tính 4 hàm mục tiêu cho một nghiệm x.
+    NSGA-II chuẩn là bài toán minimization, nên f1 được đổi dấu.
+
+    Returns
+    -------
+    F : ndarray shape (4,)
+        [−f1, f2, f3, f4]  — tất cả minimize
+    """
+    X = decode(x)  # (6, 4): [I, D, AI, H]
+
+    # f1: Tối đa hóa GDP gain => minimize (-f1)
+    f1 = -(BETA * X).sum()
+
+    # f2: Bất bình đẳng vùng — xấp xỉ Gini bằng MAD chuẩn hóa
+    sums = X.sum(axis=1)            # tổng ngân sách mỗi vùng
+    f2 = np.abs(sums - sums.mean()).mean()
+
+    # f3: Phát thải CO2 gián tiếp từ đầu tư hạ tầng (cột 0) và AI (cột 2)
+    f3 = (E_R * (X[:, 0] + X[:, 2])).sum()
+
+    # f4: Rủi ro an ninh dữ liệu ròng
+    f4 = (RHO_R * X[:, 2]).sum() - (SIGMA_R * X[:, 3]).sum()
+
+    return np.array([f1, f2, f3, f4])
+
+
+def constraint_violation(x):
+    """
+    Tính mức vi phạm ràng buộc (≥0 là vi phạm).
+    NSGA-II xử lý ràng buộc bằng cách penalize nghiệm vi phạm.
+
+    Ràng buộc:
+      C1: Σ x_{j,r} ≤ 50.000
+      C2: Σ_j x_{j,r} ≥ 5.000  ∀r
+      C3: Σ_j x_{j,r} ≤ 12.000 ∀r
+      C4: Σ_r x_{H,r} ≥ 12.000
+      C5: Dᵣ + γ·x_{D,r} ≥ λ·max_r(Dᵣ + γ·x_{D,r})
+
+    Returns
+    -------
+    total_violation : float  (0 = khả thi)
+    """
+    X = decode(x)
+    viol = 0.0
+
+    # C1: Ngân sách tổng
+    v1 = X.sum() - BUDGET_TOTAL
+    if v1 > 0:
+        viol += v1
+
+    # C2 & C3: Sàn và trần mỗi vùng
+    region_totals = X.sum(axis=1)
+    viol += np.maximum(0, BUDGET_MIN_R - region_totals).sum()
+    viol += np.maximum(0, region_totals - BUDGET_MAX_R).sum()
+
+    # C4: Sàn nhân lực số
+    v4 = BUDGET_H_MIN - X[:, 3].sum()
+    if v4 > 0:
+        viol += v4
+
+    # C5: Công bằng số hóa
+    D_new = D0 + GAMMA_FAIR * X[:, 1]  # D_r + γ·x_{D,r}
+    D_max = D_new.max()
+    viol += np.maximum(0, LAMBDA_FAIR * D_max - D_new).sum()
+
+    return viol
+
+
+def is_feasible(x, tol=1e-6):
+    return constraint_violation(x) <= tol
+class NSGA2:
+    def __init__(self,
+                 n_var=N_VAR,
+                 n_obj=4,
+                 pop_size=150,
+                 n_gen=300,
+                 xl=None,
+                 xu=None,
+                 eta_c=20.0,   # SBX distribution index
+                 eta_m=20.0,   # polynomial mutation index
+                 seed=42):
+
+        self.n_var    = n_var
+        self.n_obj    = n_obj
+        self.pop_size = pop_size
+        self.n_gen    = n_gen
+        self.xl = xl if xl is not None else np.zeros(n_var)
+        self.xu = xu if xu is not None else np.ones(n_var) * BUDGET_MAX_R
+        self.eta_c = eta_c
+        self.eta_m = eta_m
+        np.random.seed(seed)
+
+    # ---- Tạo nghiệm khởi đầu khả thi ----
+    def _init_population(self):
+        pop = []
+        attempts = 0
+        while len(pop) < self.pop_size:
+            attempts += 1
+            x = self._random_feasible()
+            if x is not None:
+                pop.append(x)
+            if attempts > self.pop_size * 500:
+                # Bổ sung ngẫu nhiên nếu không đủ khả thi
+                x = self._random_raw()
+                pop.append(x)
+        return np.array(pop[:self.pop_size])
+
+    def _random_feasible(self):
+        """Sinh nghiệm khởi đầu khả thi bằng phân bổ tỷ lệ ngẫu nhiên"""
+        X = np.zeros((N_REGIONS, N_ITEMS))
+
+        # Bước 1: Gán sàn cho từng vùng
+        for r in range(N_REGIONS):
+            X[r, :] = BUDGET_MIN_R / N_ITEMS  # phân đều sàn
+
+        # Bước 2: Gán sàn nhân lực số
+        h_needed = max(0, BUDGET_H_MIN - X[:, 3].sum())
+        if h_needed > 0:
+            add_h = h_needed / N_REGIONS
+            X[:, 3] += add_h
+
+        # Bước 3: Điều chỉnh để không vượt trần
+        for r in range(N_REGIONS):
+            total_r = X[r, :].sum()
+            if total_r > BUDGET_MAX_R:
+                X[r, :] *= BUDGET_MAX_R / total_r
+
+        # Bước 4: Ngân sách còn lại phân bổ ngẫu nhiên
+        remaining = BUDGET_TOTAL - X.sum()
+        if remaining < 0:
+            return None
+
+        for _ in range(100):  # thử phân bổ ngẫu nhiên
+            delta = np.zeros((N_REGIONS, N_ITEMS))
+            weights = np.random.dirichlet(np.ones(N_REGIONS * N_ITEMS))
+            delta = (weights * remaining).reshape(N_REGIONS, N_ITEMS)
+            X_new = X + delta
+
+            # Cắt về trần vùng
+            for r in range(N_REGIONS):
+                if X_new[r, :].sum() > BUDGET_MAX_R:
+                    excess = X_new[r, :].sum() - BUDGET_MAX_R
+                    # Giảm proportionally
+                    X_new[r, :] = X[r, :] + delta[r, :] * (
+                        (BUDGET_MAX_R - X[r, :].sum()) / delta[r, :].sum()
+                        if delta[r, :].sum() > 0 else 0
+                    )
+
+            x_flat = X_new.flatten()
+            if constraint_violation(x_flat) < 1e-3:
+                return x_flat
+
+        return None  # không tìm được nghiệm khả thi
+
+    def _random_raw(self):
+        """Sinh ngẫu nhiên, có thể không khả thi"""
+        X = np.zeros((N_REGIONS, N_ITEMS))
+        for r in range(N_REGIONS):
+            budget_r = np.random.uniform(BUDGET_MIN_R, BUDGET_MAX_R)
+            alloc = np.random.dirichlet(np.ones(N_ITEMS)) * budget_r
+            X[r, :] = alloc
+        return X.flatten()
+
+    # ---- Non-dominated sorting ----
+    def _fast_non_dominated_sort(self, F):
+        """
+        Fast non-dominated sort (Deb et al. 2002).
+        F: (pop_size, n_obj) — giá trị hàm mục tiêu (tất cả minimize)
+        Trả về: list of lists — mỗi phần tử là list chỉ số trong front đó
+        """
+        n = len(F)
+        dom_count = np.zeros(n, dtype=int)   # số nghiệm dominate nghiệm i
+        dom_set   = [[] for _ in range(n)]    # tập nghiệm bị i dominate
+        rank      = np.zeros(n, dtype=int)
+
+        # Tính quan hệ domination
+        for i in range(n):
+            for j in range(i + 1, n):
+                if self._dominates(F[i], F[j]):
+                    dom_set[i].append(j)
+                    dom_count[j] += 1
+                elif self._dominates(F[j], F[i]):
+                    dom_set[j].append(i)
+                    dom_count[i] += 1
+
+        fronts = []
+        current_front = np.where(dom_count == 0)[0].tolist()
+        rank[current_front] = 0
+        fronts.append(current_front)
+
+        while current_front:
+            next_front = []
+            for i in current_front:
+                for j in dom_set[i]:
+                    dom_count[j] -= 1
+                    if dom_count[j] == 0:
+                        rank[j] = len(fronts)
+                        next_front.append(j)
+            fronts.append(next_front)
+            current_front = next_front
+
+        return fronts, rank
+
+    def _dominates(self, a, b):
+        """a dominates b: a ≤ b tất cả mục tiêu và a < b ít nhất 1"""
+        return np.all(a <= b) and np.any(a < b)
+
+    # ---- Crowding distance ----
+    def _crowding_distance(self, F):
+        """
+        Tính crowding distance cho tập nghiệm F (n_front, n_obj).
+        """
+        n = len(F)
+        if n <= 2:
+            return np.full(n, np.inf)
+
+        dist = np.zeros(n)
+        for obj_idx in range(self.n_obj):
+            sorted_idx = np.argsort(F[:, obj_idx])
+            f_min = F[sorted_idx[0], obj_idx]
+            f_max = F[sorted_idx[-1], obj_idx]
+            dist[sorted_idx[0]]  = np.inf
+            dist[sorted_idx[-1]] = np.inf
+            if f_max - f_min < 1e-10:
+                continue
+            for k in range(1, n - 1):
+                dist[sorted_idx[k]] += (
+                    F[sorted_idx[k + 1], obj_idx] -
+                    F[sorted_idx[k - 1], obj_idx]
+                ) / (f_max - f_min)
+
+        return dist
+
+    # ---- Toán tử lai ghép SBX ----
+    def _sbx_crossover(self, p1, p2, pc=0.9):
+        """Simulated Binary Crossover"""
+        child1, child2 = p1.copy(), p2.copy()
+        if np.random.rand() > pc:
+            return child1, child2
+
+        for i in range(self.n_var):
+            if np.random.rand() > 0.5:
+                continue
+            if abs(p1[i] - p2[i]) < 1e-10:
+                continue
+
+            u = np.random.rand()
+            eta = self.eta_c
+            if u <= 0.5:
+                beta = (2 * u) ** (1 / (eta + 1))
+            else:
+                beta = (1 / (2 * (1 - u))) ** (1 / (eta + 1))
+
+            child1[i] = 0.5 * ((1 + beta) * p1[i] + (1 - beta) * p2[i])
+            child2[i] = 0.5 * ((1 - beta) * p1[i] + (1 + beta) * p2[i])
+
+            # Clip về giới hạn
+            child1[i] = np.clip(child1[i], self.xl[i], self.xu[i])
+            child2[i] = np.clip(child2[i], self.xl[i], self.xu[i])
+
+        return child1, child2
+
+    # ---- Toán tử đột biến Polynomial ----
+    def _polynomial_mutation(self, x, pm=None):
+        """Polynomial mutation"""
+        if pm is None:
+            pm = 1.0 / self.n_var
+        child = x.copy()
+        for i in range(self.n_var):
+            if np.random.rand() > pm:
+                continue
+            u   = np.random.rand()
+            eta = self.eta_m
+            if u < 0.5:
+                delta = (2 * u) ** (1 / (eta + 1)) - 1
+            else:
+                delta = 1 - (2 * (1 - u)) ** (1 / (eta + 1))
+
+            child[i] = np.clip(
+                x[i] + delta * (self.xu[i] - self.xl[i]),
+                self.xl[i],
+                self.xu[i]
+            )
+        return child
+
+    # ---- Sửa nghiệm cho khả thi ----
+    def _repair(self, x):
+        """
+        Sửa nghiệm vi phạm ràng buộc bằng projection đơn giản.
+        """
+        X = decode(x).copy()
+        X = np.maximum(X, 0)
+
+        # C2: Đảm bảo sàn mỗi vùng
+        for r in range(N_REGIONS):
+            total_r = X[r, :].sum()
+            if total_r < BUDGET_MIN_R:
+                X[r, :] += (BUDGET_MIN_R - total_r) / N_ITEMS
+
+        # C4: Đảm bảo sàn nhân lực
+        h_total = X[:, 3].sum()
+        if h_total < BUDGET_H_MIN:
+            X[:, 3] += (BUDGET_H_MIN - h_total) / N_REGIONS
+
+        # C3: Cắt về trần mỗi vùng
+        for r in range(N_REGIONS):
+            total_r = X[r, :].sum()
+            if total_r > BUDGET_MAX_R:
+                X[r, :] *= BUDGET_MAX_R / total_r
+
+        # C1: Cắt tổng ngân sách
+        total = X.sum()
+        if total > BUDGET_TOTAL:
+            X *= BUDGET_TOTAL / total
+
+        return X.flatten()
+
+    # ---- Chọn cha mẹ bằng tournament ----
+    def _tournament_select(self, pop, rank, crowd):
+        """Binary tournament selection"""
+        idx1, idx2 = np.random.choice(len(pop), 2, replace=False)
+        if rank[idx1] < rank[idx2]:
+            return pop[idx1]
+        elif rank[idx2] < rank[idx1]:
+            return pop[idx2]
+        elif crowd[idx1] >= crowd[idx2]:
+            return pop[idx1]
+        else:
+            return pop[idx2]
+
+    # ---- Vòng lặp chính NSGA-II ----
+    def run(self, verbose=True):
+        """
+        Thực thi NSGA-II.
+
+        Returns
+        -------
+        res : dict với keys:
+            'X'     : ndarray (n_pareto, n_var) - quần thể Pareto cuối
+            'F_raw' : ndarray (n_pareto, n_obj) - giá trị mục tiêu (tất cả minimize)
+            'F'     : ndarray (n_pareto, 4) - [f1, f2, f3, f4] đúng chiều
+        """
+        # --- Khởi tạo ---
+        if verbose:
+            print(f"\n[NSGA-II] pop_size={self.pop_size}, n_gen={self.n_gen}")
+            print("Khởi tạo quần thể...")
+
+        pop = self._init_population()
+        F   = np.array([objectives(x) for x in pop])  # (pop, 4)
+        CV  = np.array([constraint_violation(x) for x in pop])
+
+        history_hv = []  # theo dõi hypervolume (xấp xỉ)
+
+        for gen in range(self.n_gen):
+            # --- Tạo thế hệ con ---
+            fronts, rank_all = self._fast_non_dominated_sort(F)
+            crowd_all = np.zeros(len(pop))
+            for front in fronts:
+                if len(front) > 0:
+                    F_front = F[front]
+                    crowd_all[front] = self._crowding_distance(F_front)
+
+            # Tạo offspring
+            offspring_list = []
+            while len(offspring_list) < self.pop_size:
+                p1 = self._tournament_select(pop, rank_all, crowd_all)
+                p2 = self._tournament_select(pop, rank_all, crowd_all)
+                c1, c2 = self._sbx_crossover(p1, p2)
+                c1 = self._polynomial_mutation(c1)
+                c2 = self._polynomial_mutation(c2)
+                c1 = self._repair(c1)
+                c2 = self._repair(c2)
+                offspring_list.append(c1)
+                offspring_list.append(c2)
+
+            offspring = np.array(offspring_list[:self.pop_size])
+            F_off     = np.array([objectives(x) for x in offspring])
+            CV_off    = np.array([constraint_violation(x) for x in offspring])
+
+            # --- Gộp cha mẹ + con ---
+            combined_pop = np.vstack([pop, offspring])
+            combined_F   = np.vstack([F, F_off])
+            combined_CV  = np.concatenate([CV, CV_off])
+
+            # --- Chọn lọc: ưu tiên nghiệm khả thi, sau đó rank + crowd ---
+            # Xử lý constraint: nghiệm vi phạm ít được ưu tiên hơn nghiệm khả thi
+            F_for_sort = combined_F.copy()
+            # Penalize nghiệm vi phạm bằng cách tăng tất cả mục tiêu
+            for i, cv in enumerate(combined_CV):
+                if cv > 1e-6:
+                    F_for_sort[i] += cv * 1e-3  # penalty nhẹ
+
+            fronts_c, rank_c = self._fast_non_dominated_sort(F_for_sort)
+            crowd_c = np.zeros(len(combined_pop))
+            for front in fronts_c:
+                if len(front) > 0:
+                    crowd_c[front] = self._crowding_distance(F_for_sort[front])
+
+            # Chọn top pop_size
+            selected = []
+            for front in fronts_c:
+                if len(selected) + len(front) <= self.pop_size:
+                    selected.extend(front)
+                else:
+                    # Sắp xếp theo crowding distance giảm dần
+                    needed = self.pop_size - len(selected)
+                    sorted_front = sorted(front,
+                                          key=lambda i: crowd_c[i],
+                                          reverse=True)
+                    selected.extend(sorted_front[:needed])
+                    break
+
+            pop = combined_pop[selected]
+            F   = combined_F[selected]
+            CV  = combined_CV[selected]
+
+            # Log tiến trình
+            if verbose and (gen + 1) % 50 == 0:
+                n_feas = (CV < 1e-6).sum()
+                f1_best = -F[CV < 1e-6, 0].min() if n_feas > 0 else np.nan
+                print(f"  Gen {gen+1:4d}/{self.n_gen} | "
+                      f"Khả thi: {n_feas:3d}/{self.pop_size} | "
+                      f"Best f1 (GDP gain): {f1_best:,.0f} tỷ VND")
+
+        # --- Trích xuất mặt Pareto cuối ---
+        # Chỉ lấy nghiệm khả thi
+        feas_mask = CV < 1e-6
+        if feas_mask.sum() < 2:
+            print("  [Cảnh báo] Ít nghiệm khả thi, giảm ngưỡng...")
+            feas_mask = CV < CV.min() + 100
+
+        pop_f  = pop[feas_mask]
+        F_f    = F[feas_mask]
+
+        # Non-dominated front từ nghiệm khả thi
+        fronts_f, _ = self._fast_non_dominated_sort(F_f)
+        pareto_idx   = fronts_f[0]
+
+        X_pareto = pop_f[pareto_idx]
+        F_pareto = F_f[pareto_idx]   # [−f1, f2, f3, f4]
+
+        # Chuyển về đúng chiều
+        F_true = F_pareto.copy()
+        F_true[:, 0] = -F_pareto[:, 0]  # f1 = GDP gain (dương)
+
+        if verbose:
+            print(f"\n[Kết quả] Số nghiệm Pareto: {len(X_pareto)}")
+            print(f"  f1 GDP gain : {F_true[:, 0].min():,.0f} — {F_true[:, 0].max():,.0f} tỷ VND")
+            print(f"  f2 Bất bình đẳng: {F_true[:, 1].min():.1f} — {F_true[:, 1].max():.1f}")
+            print(f"  f3 Phát thải   : {F_true[:, 2].min():.1f} — {F_true[:, 2].max():.1f}")
+            print(f"  f4 Rủi ro      : {F_true[:, 3].min():.1f} — {F_true[:, 3].max():.1f}")
+
+        return {
+            'X'    : X_pareto,
+            'F_raw': F_pareto,
+            'F'    : F_true,       # [f1>0, f2, f3, f4]
+        }
+print("\n" + "=" * 70)
+print("CÂU 7.4.1: Chạy NSGA-II (pop=150, gen=300)")
+print("=" * 70)
+
+nsga2 = NSGA2(
+    n_var    = N_VAR,
+    n_obj    = 4,
+    pop_size = 150,
+    n_gen    = 300,
+    xl       = np.zeros(N_VAR),
+    xu       = np.ones(N_VAR) * BUDGET_MAX_R,
+    eta_c    = 20.0,
+    eta_m    = 20.0,
+    seed     = 42
+)
+
+result = nsga2.run(verbose=True)
+X_pareto = result['X']   # (n_pareto, 24)
+F_pareto = result['F']   # (n_pareto, 4): [f1, f2, f3, f4] đúng chiều
+import matplotlib.pyplot as plt
+from matplotlib.gridspec import GridSpec
+import os
+
+print("\n" + "=" * 70)
+print("CÂU 7.4.2: Biểu đồ Pareto 3D và Parallel Coordinates")
+print("=" * 70)
+
+fig = plt.figure(figsize=(20, 16))
+fig.patch.set_facecolor('#f8f9fa')
+fig.suptitle('BÀI 7 — MẶT PARETO: Tối ưu đa mục tiêu phân bổ ngân sách số Việt Nam\n'
+             '(6 vùng × 4 hạng mục, 50.000 tỷ VND, NSGA-II)',
+             fontsize=14, fontweight='bold', y=0.98)
+
+gs = GridSpec(2, 2, figure=fig, hspace=0.4, wspace=0.35)
+
+# --- 5a: Scatter 3D: f1 vs f2 vs f3 ---
+ax3d = fig.add_subplot(gs[0, 0], projection='3d')
+sc = ax3d.scatter(F_pareto[:, 0], F_pareto[:, 1], F_pareto[:, 2],
+                  c=F_pareto[:, 3],  # tô màu theo f4
+                  cmap='plasma', s=40, alpha=0.8, edgecolors='none')
+cbar = fig.colorbar(sc, ax=ax3d, shrink=0.6, pad=0.1, label='f4: Rủi ro an ninh')
+ax3d.set_xlabel('f1: GDP gain\n(tỷ VND)', fontsize=9)
+ax3d.set_ylabel('f2: Bất bình\nđẳng vùng', fontsize=9)
+ax3d.set_zlabel('f3: Phát thải\nCO₂', fontsize=9)
+ax3d.set_title('Scatter 3D: f1 vs f2 vs f3\n(màu = f4 rủi ro)', fontsize=11, fontweight='bold')
+ax3d.view_init(elev=25, azim=45)
+
+# --- 5b: Scatter 2D: f1 vs f2 (đánh đổi GDP - bất bình đẳng) ---
+ax12 = fig.add_subplot(gs[0, 1])
+sc12 = ax12.scatter(F_pareto[:, 0], F_pareto[:, 1],
+                    c=F_pareto[:, 2], cmap='RdYlGn_r', s=50, alpha=0.8, edgecolors='k', linewidths=0.3)
+fig.colorbar(sc12, ax=ax12, label='f3: Phát thải CO₂')
+ax12.set_xlabel('f1: GDP gain (tỷ VND)', fontsize=10)
+ax12.set_ylabel('f2: Bất bình đẳng vùng (MAD)', fontsize=10)
+ax12.set_title('Đánh đổi: GDP Gain ↔ Bất bình đẳng vùng', fontsize=11, fontweight='bold')
+ax12.grid(True, alpha=0.3)
+
+# --- 5c: Scatter 2D: f1 vs f3 (GDP - môi trường) ---
+ax13 = fig.add_subplot(gs[1, 0])
+sc13 = ax13.scatter(F_pareto[:, 0], F_pareto[:, 2],
+                    c=F_pareto[:, 1], cmap='YlOrRd', s=50, alpha=0.8, edgecolors='k', linewidths=0.3)
+fig.colorbar(sc13, ax=ax13, label='f2: Bất bình đẳng')
+ax13.set_xlabel('f1: GDP gain (tỷ VND)', fontsize=10)
+ax13.set_ylabel('f3: Phát thải CO₂', fontsize=10)
+ax13.set_title('Đánh đổi: GDP Gain ↔ Phát thải CO₂', fontsize=11, fontweight='bold')
+ax13.grid(True, alpha=0.3)
+
+# --- 5d: Parallel Coordinates cho 4 mục tiêu ---
+ax_pc = fig.add_subplot(gs[1, 1])
+
+# Chuẩn hóa về [0,1] cho parallel coordinates
+F_norm = F_pareto.copy()
+for j in range(4):
+    fmin, fmax = F_norm[:, j].min(), F_norm[:, j].max()
+    if fmax > fmin:
+        F_norm[:, j] = (F_norm[:, j] - fmin) / (fmax - fmin)
+
+# Tô màu theo f1 (GDP gain cao = đỏ)
+colors = plt.cm.RdYlGn(F_norm[:, 0])
+
+for i in range(len(F_pareto)):
+    ax_pc.plot(range(4), F_norm[i], color=colors[i], alpha=0.4, linewidth=0.8)
+
+# Đánh dấu nghiệm thỏa hiệp (sẽ tính ở phần sau — tạm để placeholder)
+ax_pc.set_xticks(range(4))
+ax_pc.set_xticklabels([
+    'f1: GDP gain\n(↑ tốt hơn)',
+    'f2: Bất bình\nđẳng (↓ tốt)',
+    'f3: Phát thải\nCO₂ (↓ tốt)',
+    'f4: Rủi ro\nan ninh (↓ tốt)'
+], fontsize=9)
+ax_pc.set_ylabel('Giá trị chuẩn hóa [0, 1]', fontsize=10)
+ax_pc.set_title('Parallel Coordinates — 4 mục tiêu\n(mỗi đường = 1 nghiệm Pareto)', fontsize=11, fontweight='bold')
+ax_pc.set_xlim(-0.1, 3.1)
+ax_pc.set_ylim(-0.05, 1.05)
+ax_pc.grid(True, alpha=0.3)
+
+# Colorbar cho parallel coordinates
+sm = plt.cm.ScalarMappable(cmap='RdYlGn', norm=plt.Normalize(0, 1))
+sm.set_array([])
+fig.colorbar(sm, ax=ax_pc, label='f1 chuẩn hóa (xanh=GDP thấp, đỏ=GDP cao)')
+
+# Create the directory if it doesn't exist
+output_dir = '/mnt/user-data/outputs/'
+os.makedirs(output_dir, exist_ok=True)
+
+plt.savefig(os.path.join(output_dir, 'bai7_pareto_plots.png'),
+            dpi=150, bbox_inches='tight', facecolor='#f8f9fa')
+plt.close()
+print("✓ Đã lưu: bai7_pareto_plots.png")
+print("\n" + "=" * 70)
+print("CÂU 7.4.3: TOPSIS trên tập Pareto — Chọn nghiệm thỏa hiệp")
+print("=" * 70)
+
+def topsis_on_pareto(F, weights, is_benefit):
+    """
+    Áp dụng TOPSIS lên tập nghiệm Pareto.
+
+    Parameters
+    ----------
+    F         : ndarray (n, n_obj)  — giá trị mục tiêu thực (f1 lớn tốt, f2-f4 nhỏ tốt)
+    weights   : ndarray (n_obj,)    — trọng số ưu tiên chính sách
+    is_benefit: list[bool]          — True nếu tiêu chí lợi ích
+
+    Returns
+    -------
+    scores : ndarray (n,)   — điểm TOPSIS C*
+    rank   : ndarray (n,)   — xếp hạng (1 = tốt nhất)
+    """
+    n, m = F.shape
+
+    # Bước 1: Chuẩn hóa vector
+    norms = np.sqrt((F ** 2).sum(axis=0))
+    norms[norms < 1e-12] = 1e-12
+    R = F / norms
+
+    # Bước 2: Ma trận có trọng số
+    V = R * weights
+
+    # Bước 3: Lời giải lý tưởng A* và A−
+    A_pos = np.where(is_benefit, V.max(axis=0), V.min(axis=0))
+    A_neg = np.where(is_benefit, V.min(axis=0), V.max(axis=0))
+
+    # Bước 4: Khoảng cách Euclide
+    S_pos = np.sqrt(((V - A_pos) ** 2).sum(axis=1))
+    S_neg = np.sqrt(((V - A_neg) ** 2).sum(axis=1))
+
+    # Bước 5: Hệ số gần gũi tương đối C*
+    C_star = S_neg / (S_pos + S_neg + 1e-12)
+
+    rank = len(C_star) - C_star.argsort().argsort()
+    return C_star, rank
+
+
+# Trọng số chính sách (Câu 7.4.3)
+# GDP: 0.40 | Bao trùm: 0.25 | Môi trường: 0.20 | An ninh: 0.15
+weights_policy = np.array([0.40, 0.25, 0.20, 0.15])
+
+# is_benefit: f1 lợi ích (tăng trưởng), f2-f4 chi phí
+is_benefit = np.array([True, False, False, False])
+
+C_star, topsis_rank = topsis_on_pareto(F_pareto, weights_policy, is_benefit)
+
+best_idx = np.argmax(C_star)
+X_best   = X_pareto[best_idx]
+F_best   = F_pareto[best_idx]
+
+print(f"\nTrọng số TOPSIS: GDP={weights_policy[0]:.2f}, "
+      f"Bao trùm={weights_policy[1]:.2f}, "
+      f"Môi trường={weights_policy[2]:.2f}, "
+      f"An ninh={weights_policy[3]:.2f}")
+print(f"\nNghiệm thỏa hiệp tốt nhất (C* = {C_star[best_idx]:.4f}):")
+print(f"  f1 GDP gain    : {F_best[0]:>12,.2f} tỷ VND")
+print(f"  f2 Bất bình đẳng: {F_best[1]:>12,.2f}")
+print(f"  f3 Phát thải   : {F_best[2]:>12,.2f}")
+print(f"  f4 Rủi ro      : {F_best[3]:>12,.2f}")
+
+# In phân bổ nghiệm thỏa hiệp
+X_best_mat = decode(X_best)
+print("\n  Phân bổ ngân sách tối ưu (tỷ VND):")
+print(f"  {'Vùng':<30} {'I (Hạ tầng)':>12} {'D (CĐS)':>10} {'AI':>10} {'H (NL)':>10} {'Tổng':>10}")
+print("  " + "-" * 85)
+for r in range(N_REGIONS):
+    rn = REGIONS_SHORT[r]
+    row = X_best_mat[r]
+    total = row.sum()
+    print(f"  {rn:<30} {row[0]:>12,.0f} {row[1]:>10,.0f} {row[2]:>10,.0f} {row[3]:>10,.0f} {total:>10,.0f}")
+print("  " + "-" * 85)
+total_row = X_best_mat.sum(axis=0)
+print(f"  {'TỔNG':<30} {total_row[0]:>12,.0f} {total_row[1]:>10,.0f} "
+      f"{total_row[2]:>10,.0f} {total_row[3]:>10,.0f} {total_row.sum():>10,.0f}")
+
+print(f"\n  Kiểm tra ràng buộc: vi phạm = {constraint_violation(X_best):.4f} "
+      f"({'✓ Khả thi' if constraint_violation(X_best) < 1 else '✗ Vi phạm'})")
+print("\n" + "=" * 70)
+print("CÂU 7.4.4: Phân tích chi phí cơ hội của các mục tiêu")
+print("=" * 70)
+
+# Tìm nghiệm cực trị cho mỗi mục tiêu
+idx_max_gdp  = np.argmax(F_pareto[:, 0])   # GDP gain cao nhất
+idx_min_gini = np.argmin(F_pareto[:, 1])   # Bất bình đẳng thấp nhất
+idx_min_co2  = np.argmin(F_pareto[:, 2])   # Phát thải thấp nhất
+idx_min_risk = np.argmin(F_pareto[:, 3])   # Rủi ro thấp nhất
+
+extremes = {
+    'GDP tối đa'            : F_pareto[idx_max_gdp],
+    'Bao trùm tối đa'       : F_pareto[idx_min_gini],
+    'Môi trường tốt nhất'   : F_pareto[idx_min_co2],
+    'An ninh tốt nhất'      : F_pareto[idx_min_risk],
+    'Thỏa hiệp (TOPSIS)'    : F_pareto[best_idx],
+}
+
+headers = ['Nghiệm', 'f1 GDP gain', 'f2 Bất bình đẳng', 'f3 Phát thải', 'f4 Rủi ro']
+print(f"\n  {'Nghiệm':<25} {'f1 GDP gain':>14} {'f2 Bất BĐ':>16} {'f3 Phát thải':>13} {'f4 Rủi ro':>12}")
+print("  " + "-" * 82)
+for name, vals in extremes.items():
+    print(f"  {name:<25} {vals[0]:>14,.1f} {vals[1]:>16,.1f} {vals[2]:>13,.1f} {vals[3]:>12,.1f}")
+
+# So sánh nghiệm GDP cao nhất với nghiệm thỏa hiệp
+F_gdp  = F_pareto[idx_max_gdp]
+F_comp = F_pareto[best_idx]
+
+print("\n  So sánh 'Nghiệm GDP tối đa' vs 'Nghiệm thỏa hiệp':")
+print(f"  GDP gain   : {F_gdp[0]:>10,.1f}  vs  {F_comp[0]:>10,.1f}  → nghiệm thỏa hiệp thấp hơn {(F_gdp[0]-F_comp[0])/F_gdp[0]*100:.1f}%")
+print(f"  Bất BĐ    : {F_gdp[1]:>10,.1f}  vs  {F_comp[1]:>10,.1f}  → nghiệm thỏa hiệp {'tốt hơn' if F_comp[1] < F_gdp[1] else 'kém hơn'} {abs(F_gdp[1]-F_comp[1])/max(F_gdp[1],1)*100:.1f}%")
+print(f"  Phát thải  : {F_gdp[2]:>10,.1f}  vs  {F_comp[2]:>10,.1f}  → nghiệm thỏa hiệp {'tốt hơn' if F_comp[2] < F_gdp[2] else 'kém hơn'} {abs(F_gdp[2]-F_comp[2])/max(F_gdp[2],1)*100:.1f}%")
+print(f"  Rủi ro     : {F_gdp[3]:>10,.1f}  vs  {F_comp[3]:>10,.1f}  → nghiệm thỏa hiệp {'tốt hơn' if F_comp[3] < F_gdp[3] else 'kém hơn'} {abs(F_gdp[3]-F_comp[3])/max(abs(F_gdp[3]),1)*100:.1f}%")
+
+
+P_S = {'s1': 0.30, 's2': 0.45, 's3': 0.20, 's4': 0.05}
+
+# β_j: hệ số hiệu quả first-stage
+BETA = {'I': 1.00, 'D': 1.10, 'AI': 1.25, 'H': 0.95}
+
+# β^s_j: hệ số hiệu quả second-stage theo kịch bản
+BETA_S = {
+    ('s1','I'):1.25, ('s1','D'):1.35, ('s1','AI'):1.55, ('s1','H'):1.05,
+    ('s2','I'):1.00, ('s2','D'):1.10, ('s2','AI'):1.25, ('s2','H'):0.95,
+    ('s3','I'):0.75, ('s3','D'):0.85, ('s3','AI'):0.90, ('s3','H'):1.00,
+    ('s4','I'):0.40, ('s4','D'):0.50, ('s4','AI'):0.55, ('s4','H'):1.10,
+}
+
+BUDGET1  = 65_000   # tỷ VND — ngân sách first-stage (giữ lại 15.000 dự phòng)
+RESERVE  = 15_000   # tỷ VND — ngân sách second-stage dự phòng
+BUDGET2  = {'s1': 15_000, 's2': 15_000, 's3': 12_000, 's4': 8_000}
+MIN_H    = 15_000   # sàn nhân lực số first-stage
+MIN_ITEM =  3_000   # sàn tối thiểu từng hạng mục
+
+# Thông tin kịch bản kinh tế
+SCEN_INFO = {
+    's1': {'label':'Lạc quan',    'gdp_world':3.5, 'fdi':32.0, 'export':12.0},
+    's2': {'label':'Cơ sở',       'gdp_world':2.8, 'fdi':27.0, 'export': 8.0},
+    's3': {'label':'Bi quan',     'gdp_world':1.5, 'fdi':20.0, 'export': 3.0},
+    's4': {'label':'Khủng hoảng', 'gdp_world':0.2, 'fdi':12.0, 'export':-5.0},
+}
+def build_SP(fix_x=None, beta_s_override=None,
+             budget2_override=None, scenarios=None):
+    """
+    Xây dựng và giải bài toán Two-Stage SP bằng Pyomo + HiGHS.
+
+    fix_x           : dict {j: val} — cố định x (cho EEV)
+    beta_s_override : dict {(s,j): val} — override beta_s (cho EV)
+    budget2_override: dict {s: val}     — override budget2 (cho EV)
+    scenarios       : list — tập kịch bản dùng (mặc định SCENS)
+    """
+    sc  = scenarios if scenarios else SCENS
+    b2  = budget2_override if budget2_override else BUDGET2
+    bs  = beta_s_override if beta_s_override else BETA_S
+
+    m = pyo.ConcreteModel()
+    m.J = pyo.Set(initialize=ITEMS)
+    m.S = pyo.Set(initialize=sc)
+
+    m.x = pyo.Var(m.J, within=pyo.NonNegativeReals)
+    m.y = pyo.Var(m.S, m.J, within=pyo.NonNegativeReals)
+
+    # Cố định x nếu đánh giá EEV
+    if fix_x:
+        for j in ITEMS:
+            m.x[j].fix(fix_x[j])
+
+    # ── Hàm mục tiêu ────────────────────────────────────────
+    p_use = {s: P_S[s] for s in sc}
+    total_p = sum(p_use.values())
+    # Chuẩn hóa xác suất nếu chỉ dùng 1 kịch bản
+    if len(sc) == 1:
+        p_use = {sc[0]: 1.0}
+
+    m.obj = pyo.Objective(
+        expr=(sum(BETA[j] * m.x[j] for j in ITEMS)
+            + sum(p_use[s] * bs[s, j] * m.y[s, j]
+                  for s in sc for j in ITEMS)),
+        sense=pyo.maximize,
+    )
+
+    # ── Ràng buộc ────────────────────────────────────────────
+    # C1: Ngân sách first-stage
+    m.c1 = pyo.Constraint(
+        expr=sum(m.x[j] for j in ITEMS) <= BUDGET1)
+
+    # C4: Sàn nhân lực số (H là "hàng hóa bảo hiểm")
+    m.c4 = pyo.Constraint(expr=m.x['H'] >= MIN_H)
+
+    # C5: Sàn tối thiểu từng hạng mục
+    def c5_rule(m, j):
+        return m.x[j] >= MIN_ITEM
+    m.c5 = pyo.Constraint(m.J, rule=c5_rule)
+
+    # C2: Ngân sách second-stage theo kịch bản
+    def c2_rule(m, s):
+        return sum(m.y[s, j] for j in ITEMS) <= b2[s]
+    m.c2 = pyo.Constraint(m.S, rule=c2_rule)
+
+    # C3: Mở rộng AI bị giới hạn bởi nhân lực đã đào tạo
+    def c3_rule(m, s):
+        return m.y[s, 'AI'] <= 0.5 * m.x['H']
+    m.c3 = pyo.Constraint(m.S, rule=c3_rule)
+
+    # ── Giải ────────────────────────────────────────────────
+    solver = SolverFactory('highs')
+    result = solver.solve(m, tee=False)
+
+    if str(result.solver.status) != 'ok':
+        return {'feasible': False}
+
+    x_val = {j: pyo.value(m.x[j]) for j in ITEMS}
+    y_val = {(s, j): pyo.value(m.y[s, j])
+             for s in sc for j in ITEMS}
+    Z_val = pyo.value(m.obj)
+
+    # Shadow prices
+    sp = {}
+    try:
+        sp['C1_budget'] = pyo.value(m.dual[m.c1]) if hasattr(m, 'dual') else 0
+    except Exception:
+        sp = {}
+
+    return {
+        'feasible': True,
+        'Z': Z_val,
+        'x': x_val,
+        'y': y_val,
+        'model': m,
+    }
+
+
+def build_WS(s0):
+    """
+    Wait-and-See: biết trước kịch bản s0 → tối ưu x + y^s0 cùng lúc.
+    """
+    m = pyo.ConcreteModel()
+    m.J = pyo.Set(initialize=ITEMS)
+    m.x = pyo.Var(m.J, within=pyo.NonNegativeReals)
+    m.y = pyo.Var(m.J, within=pyo.NonNegativeReals)
+
+    m.obj = pyo.Objective(
+        expr=(sum(BETA[j]     * m.x[j] for j in ITEMS)
+            + sum(BETA_S[s0, j] * m.y[j] for j in ITEMS)),
+        sense=pyo.maximize,
+    )
+    m.c1  = pyo.Constraint(expr=sum(m.x[j] for j in ITEMS) <= BUDGET1)
+    m.c4  = pyo.Constraint(expr=m.x['H'] >= MIN_H)
+    def c5_ws(m, j): return m.x[j] >= MIN_ITEM
+    m.c5  = pyo.Constraint(m.J, rule=c5_ws)
+    m.c2  = pyo.Constraint(expr=sum(m.y[j] for j in ITEMS) <= BUDGET2[s0])
+    m.c3  = pyo.Constraint(expr=m.y['AI'] <= 0.5 * m.x['H'])
+
+    SolverFactory('highs').solve(m, tee=False)
+
+    return {
+        'Z': pyo.value(m.obj),
+        'x': {j: pyo.value(m.x[j]) for j in ITEMS},
+        'y': {j: pyo.value(m.y[j]) for j in ITEMS},
+    }
+
+
+def build_robust_minimax():
+    """
+    Câu 10.5.4: Robust optimization — minimax regret.
+    Tối thiểu hóa regret tối đa trên mọi kịch bản.
+    Regret(x, s) = Z_WS(s) - [β·x + β^s·y^s(x)]
+    min_x  max_s Regret(x,s)  ↔  min_x  θ  s.t. θ ≥ Regret(x,s) ∀s
+    """
+    # Lấy Z_WS(s) trước
+    ws_Z = {s: build_WS(s)['Z'] for s in SCENS}
+
+    m = pyo.ConcreteModel()
+    m.J = pyo.Set(initialize=ITEMS)
+    m.S = pyo.Set(initialize=SCENS)
+    m.x = pyo.Var(m.J, within=pyo.NonNegativeReals)
+    m.y = pyo.Var(m.S, m.J, within=pyo.NonNegativeReals)
+    m.theta = pyo.Var(within=pyo.NonNegativeReals)   # max regret
+
+    # Minimize max regret
+    m.obj = pyo.Objective(expr=m.theta, sense=pyo.minimize)
+
+    # Regret constraint: theta >= Z_WS(s) - [β·x + β^s·y^s]
+    def regret_rule(m, s):
+        achieved = (sum(BETA[j] * m.x[j] for j in ITEMS)
+                  + sum(BETA_S[s, j] * m.y[s, j] for j in ITEMS))
+        return m.theta >= ws_Z[s] - achieved
+    m.c_regret = pyo.Constraint(m.S, rule=regret_rule)
+
+    m.c1 = pyo.Constraint(expr=sum(m.x[j] for j in ITEMS) <= BUDGET1)
+    m.c4 = pyo.Constraint(expr=m.x['H'] >= MIN_H)
+    def c5_r(m, j): return m.x[j] >= MIN_ITEM
+    m.c5 = pyo.Constraint(m.J, rule=c5_r)
+    def c2_r(m, s): return sum(m.y[s, j] for j in ITEMS) <= BUDGET2[s]
+    m.c2 = pyo.Constraint(m.S, rule=c2_r)
+    def c3_r(m, s): return m.y[s, 'AI'] <= 0.5 * m.x['H']
+    m.c3 = pyo.Constraint(m.S, rule=c3_r)
+
+    SolverFactory('highs').solve(m, tee=False)
+
+    x_val = {j: pyo.value(m.x[j]) for j in ITEMS}
+    y_val = {(s, j): pyo.value(m.y[s, j]) for s in SCENS for j in ITEMS}
+    return {
+        'x': x_val, 'y': y_val,
+        'max_regret': pyo.value(m.theta),
+        'ws_Z': ws_Z,
+    }
+import pyomo.environ as pyo
+from pyomo.opt import SolverFactory
+
+# Define global constants used in the functions and printing
+SCENS = list(SCEN_INFO.keys())
+ITEMS = list(BETA.keys())
+ITEMS_F = list(BETA.keys()) # Assuming ITEMS_F are just the item keys for now, adjust if needed
+
+print('\n[ Câu 10.5.1 ] Giải SP bằng Pyomo (solver HiGHS)')
+print('-' * 65)
+
+res_SP = build_SP()
+assert res_SP['feasible'], 'SP không khả thi!'
+Z_SP  = res_SP['Z']
+x_SP  = res_SP['x']
+y_SP  = res_SP['y']
+
+print(f'  ✓ Trạng thái: TỐI ƯU  |  Z* = {Z_SP:,.4f}  (tỷ VND GDP gain)\n')
+print('  First-stage decision x_j* (here-and-now):')
+for j, jf in zip(ITEMS, ITEMS_F):
+    print(f'    {jf:<30}: x[{j}] = {x_SP[j]:>10,.1f} tỷ  ({x_SP[j]/BUDGET1*100:.1f}%)')
+print(f'  Tổng first-stage: {sum(x_SP.values()):>10,.1f} / {BUDGET1:,} tỷ')
+
+print('\n  Second-stage recourse y^s_j* (wait-and-see):')
+print(f'  {"Hạng mục":<20}' + ''.join(f'  {s:>10}' for s in SCENS))
+print('  ' + '-' * 60)
+for j in ITEMS:
+    row = f'  {ITEMS_F[ITEMS.index(j)]:<20}'
+    for s in SCENS:
+        row += f'  {y_SP[s,j]:>10,.1f}'
+    print(row)
+print(f'  {"Tổng y^s":<20}' +
+      ''.join(f'  {sum(y_SP[s,j] for j in ITEMS):>10,.1f}' for s in SCENS))
+print(f'  {"Budget2^s":<20}' +
+      ''.join(f'  {BUDGET2[s]:>10,}' for s in SCENS))
+
+# Kiểm tra ràng buộc C3
+print(f'\n  Kiểm tra C3 (y_AI ≤ 0.5·x_H, x_H = {x_SP["H"]:,.0f}):')
+for s in SCENS:
+    ok = y_SP[s,'AI'] <= 0.5*x_SP['H'] + 1
+    print(f'    y[{s},AI] = {y_SP[s,"AI"]:>8,.1f}  ≤  {0.5*x_SP["H"]:>8,.1f}  '+
+          f'{"✓" if ok else "✗"}')
+print('\n[ Câu 10.5.2 ] So sánh SP vs. EV (deterministic)')
+print('-' * 65)
+
+# EV: dùng E[β^s_j] thay cho β^s_j theo từng kịch bản
+beta_s_EV = {(s, j): sum(P_S[ss] * BETA_S[ss, j] for ss in SCENS)
+              for s in SCENS for j in ITEMS}
+# EV không biết budget giảm → dùng budget tối đa
+budget2_EV = {s: RESERVE for s in SCENS}
+
+res_EV = build_SP(beta_s_override=beta_s_EV, budget2_override=budget2_EV)
+x_EV   = res_EV['x']
+Z_EV   = res_EV['Z']
+
+# EEV: evaluate x_EV dưới bài toán SP thực
+res_EEV = build_SP(fix_x=x_EV)
+Z_EEV   = res_EEV['Z']
+
+print(f'  EV (deterministic với E[β^s]):')
+for j in ITEMS:
+    print(f'    x_EV[{j}] = {x_EV[j]:>10,.1f}  |  x_SP[{j}] = {x_SP[j]:>10,.1f}')
+print(f'  EV objective (lạc quan): {Z_EV:>12,.4f}')
+print(f'  EEV = E[SP | x=x_EV]:   {Z_EEV:>12,.4f}')
+print(f'  SP  = E[SP | x=x_SP*]:  {Z_SP:>12,.4f}')
+
+same_x = all(abs(x_EV[j] - x_SP[j]) < 1 for j in ITEMS)
+print(f'\n  x_EV ≈ x_SP? {"Có" if same_x else "Không"} '
+      f'(sai số tối đa = {max(abs(x_EV[j]-x_SP[j]) for j in ITEMS):.2f})')
+
+# Practical comparison với naive strategies
+X_NAIVE = {
+    'AI-heavy\n(bỏ qua rủi ro)':  {'I':3000,'D':3000,'AI':44000,'H':15000},
+    'H-conservative\n(né tránh)': {'I':5000,'D':5000,'AI':15000,'H':40000},
+    'Cân bằng\n(truyền thống)':   {'I':12000,'D':10000,'AI':20000,'H':23000},
+}
+print(f'\n  So sánh SP vs. chiến lược naive (Practical Value of SP):')
+print(f'  {"Chiến lược":<30} {"Z_eval":>12}  {"Gap vs SP":>12}  {"Gap%":>8}')
+print('  ' + '-' * 68)
+print(f'  {"SP (stochastic optimal)":<30} {Z_SP:>12,.2f}  {"—":>12}  {"—":>8}')
+for name, xn in X_NAIVE.items():
+    r = build_SP(fix_x=xn)
+    z_n = r['Z']
+    gap  = Z_SP - z_n
+    gpct = gap / Z_SP * 100
+    short_name = name.replace('\n', ' ')
+    print(f'  {short_name:<30} {z_n:>12,.2f}  {gap:>+12,.2f}  {gpct:>7.2f}%')
+print('\n[ Câu 10.5.3 ] Tính VSS và EVPI')
+print('-' * 65)
+
+# WS: Wait-and-See per scenario
+WS_results = {}
+Z_WS = 0.0
+print('  Wait-and-See (thông tin hoàn hảo) từng kịch bản:')
+print(f'  {"Kịch bản":<15} {"p":>6} {"Z_WS":>12} {"x_AI":>10} '
+      f'{"x_H":>10} {"y_AI":>10} {"y_H":>10}')
+print('  ' + '-' * 75)
+for s in SCENS:
+    ws = build_WS(s)
+    WS_results[s] = ws
+    Z_WS += P_S[s] * ws['Z']
+    print(f'  {SCEN_INFO[s]["label"]:<15} {P_S[s]:>6.2f} '
+          f'{ws["Z"]:>12,.2f} {ws["x"]["AI"]:>10,.0f} '
+          f'{ws["x"]["H"]:>10,.0f} {ws["y"]["AI"]:>10,.0f} '
+          f'{ws["y"]["H"]:>10,.0f}')
+
+VSS  = Z_SP - Z_EEV
+EVPI = Z_WS - Z_SP
+
+print(f'\n  Tổng kết VSS và EVPI:')
+print(f'  SP   (Stochastic Program)  = {Z_SP:>14,.4f}')
+print(f'  EEV  (EV solution in SP)   = {Z_EEV:>14,.4f}')
+print(f'  WS   (Wait-and-See)        = {Z_WS:>14,.4f}')
+print(f'  VSS  = SP − EEV            = {VSS:>14,.4f}')
+print(f'  EVPI = WS − SP             = {EVPI:>14,.4f}')
+print(f'\n  Diễn giải:')
+if abs(VSS) < 0.01:
+    print(f'  → VSS ≈ 0: Trong LP tuyến tính với "relatively complete recourse",')
+    print(f'    x_SP* = x_EV* (cùng một nghiệm góc tối ưu). Đây là kết quả đúng')
+    print(f'    theo lý thuyết Birge & Louveaux (2011). VSS > 0 xuất hiện khi có')
+    print(f'    biến nguyên (MIP) hoặc feasibility regions khác nhau theo scenario.')
+if abs(EVPI) < 0.01:
+    print(f'  → EVPI ≈ 0: Khi x* không thay đổi theo scenario (same optimal x),')
+    print(f'    WS = SP. Thông tin hoàn hảo không tạo ra lợi thế về FIRST-STAGE.')
+    print(f'    Tuy nhiên thông tin scenario vẫn rất quan trọng cho SECOND-STAGE:')
+    print(f'    y^s1_AI={y_SP["s1","AI"]:,.0f} tỷ (lạc quan) vs '
+          f'y^s4_AI={y_SP["s4","AI"]:,.0f} tỷ (khủng hoảng).')
+
+# Tính regret cho từng scenario
+print(f'\n  Regret phân tích:')
+print(f'  {"Kịch bản":<15} {"Z_WS":>12} {"Z_SP_eval":>12} {"Regret":>12}')
+print('  ' + '-' * 53)
+for s in SCENS:
+    z_sp_s = (sum(BETA[j]*x_SP[j] for j in ITEMS)
+            + sum(BETA_S[s,j]*y_SP[s,j] for j in ITEMS))
+    regret = WS_results[s]['Z'] - z_sp_s
+    print(f'  {SCEN_INFO[s]["label"]:<15} {WS_results[s]["Z"]:>12,.2f} '
+          f'{z_sp_s:>12,.2f} {regret:>12,.2f}')
+import matplotlib.pyplot as plt
+import numpy as np
+import matplotlib.ticker as mticker
+
+print('\n[ Câu 10.5.4 ] Robust Optimization — Minimax Regret')
+print('-' * 65)
+
+res_rob = build_robust_minimax()
+x_rob   = res_rob['x']
+max_reg = res_rob['max_regret']
+ws_Z    = res_rob['ws_Z']
+
+# Evaluate x_rob in SP
+res_rob_eval = build_SP(fix_x=x_rob)
+Z_rob_in_SP  = res_rob_eval['Z']
+
+print(f'  Minimax regret tối thiểu: {max_reg:>12,.4f} tỷ VND')
+print(f'\n  So sánh first-stage x_j:')
+print(f'  {"Hạng mục":<20} {"x_SP":>12} {"x_Robust":>12} {"Δ":>10}')
+print('  ' + '-' * 56)
+for j, jf in zip(ITEMS, ITEMS_F):
+    delta = x_rob[j] - x_SP[j]
+    print(f'  {jf:<20} {x_SP[j]:>12,.1f} {x_rob[j]:>12,.1f} {delta:>+10,.1f}')
+print(f'\n  Z trong SP:   SP optimal = {Z_SP:>12,.4f}')
+print(f'               Robust      = {Z_rob_in_SP:>12,.4f}')
+print(f'  Chi phí robust (SP - Rob) = {Z_SP - Z_rob_in_SP:>12,.4f}  '
+      f'({(Z_SP-Z_rob_in_SP)/Z_SP*100:.2f}%)')
+
+print(f'\n  Regret của từng nghiệm theo scenario:')
+print(f'  {"Kịch bản":<15} {"Regret(SP)":>12} {"Regret(Rob)":>14}')
+print('  ' + '-' * 43)
+
+reg_SP_values  = []
+reg_Rob_values = []
+
+for s in SCENS:
+    z_sp_s = (sum(BETA[j]*x_SP[j] for j in ITEMS)
+            + sum(BETA_S[s,j]*y_SP[s,j] for j in ITEMS))
+    y_rob_s = {j: res_rob['y'][s,j] for j in ITEMS}
+    z_rob_s = (sum(BETA[j]*x_rob[j] for j in ITEMS)
+             + sum(BETA_S[s,j]*y_rob_s[j] for j in ITEMS))
+    reg_sp  = ws_Z[s] - z_sp_s
+    reg_rob = ws_Z[s] - z_rob_s
+    print(f'  {SCEN_INFO[s]["label"]:<15} {reg_sp:>12,.2f} {reg_rob:>14,.2f}')
+    reg_SP_values.append(reg_sp)
+    reg_Rob_values.append(reg_rob)
