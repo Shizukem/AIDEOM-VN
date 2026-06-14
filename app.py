@@ -1116,4 +1116,3 @@ elif route=="b9":   page_bai9()
 elif route=="b10":  page_bai10()
 elif route=="b11":  page_bai11()
 elif route=="b12":  page_bai12()
-"""
