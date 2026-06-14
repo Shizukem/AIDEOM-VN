@@ -5,3 +5,5 @@ matplotlib
 scipy
 plotly
 pymoo
+cvxpy
+clarabel
