@@ -1,0 +1,132 @@
+Source: vietnam_macro_2020_2025.csv
+
+import numpy as np
+import pandas as pd
+
+# Dữ liệu đầu vào (được chuyển từ cell ufVrLO9SBTjt)
+data = {
+    'Year': [2020, 2021, 2022, 2023, 2024, 2025],
+    'Y': [8044.4, 8487.5, 9513.3, 10221.8, 11511.9, 12847.6],  # GDP (nghìn tỷ VND)
+    'K': [16500, 17800, 19600, 21300, 23500, 25900],  # Vốn tích lũy (nghìn tỷ)
+    'L': [53.6, 50.5, 51.7, 52.4, 52.9, 53.4],  # Lao động (triệu người)
+    'D': [12.0, 12.7, 14.3, 16.5, 18.3, 19.5],  # Kinh tế số/GDP (%)
+    'AI': [55.6, 60.2, 65.4, 67.0, 73.8, 80.1],  # DN số (nghìn)
+    'H': [24.1, 26.1, 26.2, 27.0, 28.4, 29.2]  # LĐ qua đào tạo (%)
+}
+
+df = pd.DataFrame(data)
+
+# Hệ số Cobb-Douglas (được chuyển từ cell ufVrLO9SBTjt)
+alpha = 0.33  # Độ co giãn theo vốn vật chất
+beta = 0.42   # Độ co giãn theo lao động
+gamma = 0.10  # Độ co giãn theo số hóa
+delta = 0.08  # Độ co giãn theo AI
+theta = 0.07  # Độ co giãn theo vốn nhân lực
+
+# Trích xuất các biến từ DataFrame df
+Y = df['Y']
+K = df['K']
+L = df['L']
+D = df['D']
+AI = df['AI']
+H = df['H']
+years = df['Year']
+
+# CÂU 1.4.1 — Ước lượng TFP (A_t)
+# ─────────────────────────────────────────────────────────────────
+print("\n[ Câu 1.4.1 ] ─ Ước lượng năng suất nhân tố tổng hợp TFP (A_t)")
+print("-" * 55)
+
+# A_t = Y / (K**alpha * L**beta * D**gamma * AI**delta * H**theta)
+A = Y / (K**alpha * L**beta * D**gamma * AI**delta * H**theta)
+
+df_tfp = pd.DataFrame({'Năm': years, 'GDP (nghìn tỷ)': Y, 'TFP A_t': A})
+print(df_tfp.to_string(index=False, float_format='%.4f'))
+
+A_mean = A.mean()
+print(f"\n  → TFP trung bình 2020-2025: {A_mean:.4f}")
+trend = np.polyfit(years, A, 1)
+print(f"  → Xu hướng TFP: {'tăng' if trend[0] > 0 else 'giảm'} ({trend[0]:+.4f}/năm)")
+print("\n[ Câu 1.4.2 ] ─ So sánh GDP dự báo vs. thực tế, tính MAPE")
+print("-" * 55)
+
+Y_hat = A_mean * (K**alpha * L**beta * D**gamma * AI**delta * H**theta)
+MAPE  = np.mean(np.abs((Y - Y_hat) / Y)) * 100
+
+df_compare = pd.DataFrame({
+    'Năm':          years,
+    'GDP thực (nghìn tỷ)': Y,
+    'GDP dự báo':   Y_hat,
+    'Sai lệch (%)': np.abs((Y - Y_hat) / Y) * 100
+})
+print(df_compare.to_string(index=False, float_format='%.2f'))
+print(f"\n  → MAPE = {MAPE:.4f}%")
+print("\n[ Câu 1.4.3 ] ─ Phân rã tăng trưởng GDP 2021-2025")
+print("-" * 55)
+
+# Δln(X) ≈ tỷ lệ tăng trưởng của X
+dln_Y  = np.diff(np.log(Y))
+dln_K  = np.diff(np.log(K))
+dln_L  = np.diff(np.log(L))
+dln_D  = np.diff(np.log(D))
+dln_AI = np.diff(np.log(AI))
+dln_H  = np.diff(np.log(H))
+
+contrib_K  = alpha * dln_K
+contrib_L  = beta  * dln_L
+contrib_D  = gamma * dln_D
+contrib_AI = delta * dln_AI
+contrib_H  = theta * dln_H
+contrib_TFP = dln_Y - contrib_K - contrib_L - contrib_D - contrib_AI - contrib_H
+
+years_delta = years[1:]
+df_growth = pd.DataFrame({
+    'Năm':    years_delta,
+    'ΔlnY':   dln_Y  * 100,
+    'K (%)':  contrib_K  * 100,
+    'L (%)':  contrib_L  * 100,
+    'D (%)':  contrib_D  * 100,
+    'AI (%)': contrib_AI * 100,
+    'H (%)':  contrib_H  * 100,
+    'TFP (%)':contrib_TFP * 100,
+})
+print(df_growth.to_string(index=False, float_format='%.3f'))
+
+# Bình quân hàng năm
+avg_contrib = {
+    'Vốn K':      contrib_K.mean()  * 100,
+    'Lao động L': contrib_L.mean()  * 100,
+    'Số hóa D':   contrib_D.mean()  * 100,
+    'AI':         contrib_AI.mean() * 100,
+    'Nhân lực H': contrib_H.mean()  * 100,
+    'TFP':        contrib_TFP.mean()* 100,
+}
+total_avg = dln_Y.mean() * 100
+print(f"\n  Tổng tăng trưởng GDP bình quân/năm: {total_avg:.3f}%")
+print("\n  Đóng góp bình quân (điểm % / năm):")
+for k, v in avg_contrib.items():
+    pct_share = v / total_avg * 100
+    print(f"    {k:<14}: {v:+.3f} pp   ({pct_share:+.1f}% tổng tăng trưởng)")
+print("\n[ Câu 1.4.4 ] ─ Dự báo GDP Việt Nam 2030")
+print("-" * 55)
+
+# TFP tăng 1.2%/năm từ 2025
+A_2030  = A.iloc[-1] * (1 + 0.012) ** 5      # 5 năm từ 2025→2030
+K_2030  = K.iloc[-1] * (1 + 0.06)  ** 5
+L_2030  = L.iloc[-1] * (1 + 0.006) ** 5      # L tăng khoảng 0.6%/năm
+D_2030  = 30.0                           # mục tiêu 30%
+AI_2030 = 100.0                          # 100 nghìn DN số
+H_2030  = 35.0                           # 35% LĐ qua đào tạo
+
+Y_2030 = A_2030 * (K_2030**alpha * L_2030**beta * D_2030**gamma
+                   * AI_2030**delta * H_2030**theta)
+
+print(f"  Giả định đến 2030:")
+print(f"    K_2030  = {K_2030:,.1f} nghìn tỷ VND  (+6%/năm)")
+print(f"    L_2030  = {L_2030:.2f} triệu người   (+~0.6%/năm)")
+print(f"    D_2030  = {D_2030:.1f}% GDP           (mục tiêu QĐ 749)")
+print(f"    AI_2030 = {AI_2030:.0f} nghìn DN số")
+print(f"    H_2030  = {H_2030:.1f}% LĐ qua đào tạo")
+print(f"    A_2030  = {A_2030:.4f}  (+1.2%/năm)")
+print(f"\n  → GDP dự báo 2030: {Y_2030:,.1f} nghìn tỷ VND")
+print(f"  → Tăng trưởng kép 2025-2030: {((Y_2030/Y.iloc[-1])**(1/5)-1)*100:.2f}%/năm")
