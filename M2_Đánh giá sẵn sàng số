@@ -1,0 +1,179 @@
+import numpy as np
+
+REGION_NAMES = [
+    'Trung du miền núi phía Bắc',
+    'Đồng bằng sông Hồng',
+    'Bắc Trung Bộ + DH Trung Bộ',
+    'Tây Nguyên',
+    'Đông Nam Bộ',
+    'Đồng bằng sông Cửu Long',
+]
+REGION_SHORT = ['TDMNPB', 'ĐBSH', 'BTB+DHMT', 'TN', 'ĐNB', 'ĐBSCL']
+
+# Ma trận quyết định: 6 vùng × 8 tiêu chí
+# [GRDP/người, FDI, Digital, AIReadiness, LĐ_ĐT, R&D, Internet, Gini]
+REGION_MATRIX = np.array([
+    [57.0,  3.5,  38, 22, 21.5, 0.18, 72, 0.405],
+    [152.3, 20.0, 78, 68, 36.8, 0.85, 92, 0.358],
+    [87.5,  8.2,  55, 40, 27.5, 0.32, 84, 0.372],
+    [68.9,  0.8,  32, 18, 18.2, 0.15, 68, 0.412],
+    [158.9, 18.5, 82, 75, 42.5, 0.78, 94, 0.385],
+    [80.5,  2.1,  48, 30, 16.8, 0.22, 78, 0.392],
+], dtype=float)
+
+REGION_CRITERIA  = ['GRDP/người','FDI','Digital','AIReadiness','LĐ_ĐT%','R&D%','Internet%','Gini']
+REGION_IS_BENEFIT = [True, True, True, True, True, True, True, False]
+
+# Trọng số chuyên gia (Câu 6.4.1)
+W_EXPERT = np.array([0.10, 0.10, 0.15, 0.20, 0.15, 0.15, 0.05, 0.10])
+SECTOR_NAMES = [
+    'Nông-Lâm-Thủy sản', 'CN chế biến chế tạo', 'Xây dựng',
+    'Khai khoáng', 'Bán buôn-bán lẻ', 'Tài chính-Ngân hàng',
+    'Logistics-Vận tải', 'CNTT-Truyền thông', 'Giáo dục-Đào tạo', 'Y tế',
+]
+SECTOR_SHORT = ['NLS','CBCT','XD','KK','BBLR','TCNH','Logistics','CNTT','GD','YT']
+
+# [Growth%, NăngSuất, LanTỏa, XK(tỷUSD), ViệcLàm(tr), AIReadiness, RủiRoTĐH%]
+SECTOR_MATRIX = np.array([
+    [3.27,  103.4, 0.35, 40.5,  13.20, 15, 18],
+    [9.64,  241.2, 0.78, 290.9, 11.50, 55, 42],
+    [7.45,  168.8, 0.42, 2.5,   4.80,  20, 25],
+    [-1.20, 1290.5,0.30, 8.2,   0.30,  30, 55],
+    [7.10,  145.3, 0.55, 5.5,   7.80,  48, 38],
+    [7.36,  1072.4,0.85, 1.2,   0.55,  72, 52],
+    [9.93,  321.4, 0.72, 3.1,   1.95,  42, 35],
+    [7.85,  713.8, 0.92, 178.0, 0.62,  88, 28],
+    [6.42,  205.7, 0.65, 0.0,   2.15,  38, 22],
+    [6.85,  437.1, 0.60, 0.0,   0.75,  45, 18],
+], dtype=float)
+
+# Trọng số Priority (Bài 3): a1..a7 (a7 là trừ rủi ro)
+W_PRIORITY = np.array([0.15, 0.15, 0.20, 0.15, 0.10, 0.20, 0.15])
+def topsis(X, weights, is_benefit):
+    """
+    Thuật toán TOPSIS (Hwang & Yoon, 1981).
+
+    Parameters
+    ----------
+    X         : ndarray (n_alt, n_crit)
+    weights   : ndarray (n_crit,)
+    is_benefit: list[bool]
+
+    Returns
+    -------
+    C_star : ndarray (n_alt,)  — điểm TOPSIS [0,1]
+    rank   : ndarray (n_alt,)  — xếp hạng (1=tốt nhất)
+    """
+    # Bước 1: Chuẩn hóa vector
+    norms = np.sqrt((X**2).sum(axis=0))
+    norms[norms < 1e-12] = 1e-12
+    R = X / norms
+
+    # Bước 2: Ma trận có trọng số
+    V = R * weights
+
+    # Bước 3: Lời giải lý tưởng A+ và A-
+    ib = np.array(is_benefit)
+    A_pos = np.where(ib, V.max(axis=0), V.min(axis=0))
+    A_neg = np.where(ib, V.min(axis=0), V.max(axis=0))
+
+    # Bước 4: Khoảng cách Euclide
+    S_pos = np.sqrt(((V - A_pos)**2).sum(axis=1))
+    S_neg = np.sqrt(((V - A_neg)**2).sum(axis=1))
+
+    # Bước 5: Hệ số gần gũi tương đối C*
+    C_star = S_neg / (S_pos + S_neg + 1e-12)
+    rank = len(C_star) + 1 - C_star.argsort().argsort() - 1
+    rank = C_star.argsort()[::-1].argsort() + 1
+    return C_star, rank
+
+
+def entropy_weights(X):
+    """Trọng số khách quan theo phương pháp Entropy."""
+    X_pos = np.abs(X) + 1e-12
+    P = X_pos / X_pos.sum(axis=0)
+    k = 1.0 / np.log(len(X) + 1e-12)
+    E = -k * np.nansum(P * np.log(P + 1e-12), axis=0)
+    d = 1 - E
+    d[d < 0] = 0
+    total = d.sum()
+    if total < 1e-12:
+        return np.ones(X.shape[1]) / X.shape[1]
+    return d / total
+def compute_priority(X_sector, weights_priority):
+    """
+    Tính chỉ số Priority ngành theo Bài 3.
+    X_sector: (10, 7) — 6 cột tốt + 1 cột xấu (Risk)
+    """
+    def norm_good(col):
+        mn, mx = col.min(), col.max()
+        return (col - mn) / (mx - mn + 1e-12)
+    def norm_bad(col):
+        mn, mx = col.min(), col.max()
+        return (mx - col) / (mx - mn + 1e-12)
+
+    Xg = np.column_stack([norm_good(X_sector[:, j]) for j in range(6)])
+    Xb = norm_bad(X_sector[:, 6])
+
+    w_good = weights_priority[:6]
+    w_risk = weights_priority[6]
+    priority = Xg @ w_good - w_risk * Xb
+    rank = priority.argsort()[::-1].argsort() + 1
+    return priority, rank
+
+
+def run_m2(scenario_id='S5', verbose=True):
+    """
+    Chạy Module M2. scenario_id ảnh hưởng đến trọng số ưu tiên chính sách.
+    """
+    # Điều chỉnh trọng số theo kịch bản
+    w_map = {
+        'S1': np.array([0.15, 0.12, 0.10, 0.10, 0.18, 0.15, 0.05, 0.15]),
+        'S2': np.array([0.08, 0.10, 0.22, 0.18, 0.12, 0.12, 0.08, 0.10]),
+        'S3': np.array([0.08, 0.10, 0.18, 0.28, 0.12, 0.12, 0.05, 0.07]),
+        'S4': np.array([0.12, 0.08, 0.12, 0.12, 0.20, 0.18, 0.05, 0.13]),
+        'S5': W_EXPERT,
+    }
+    w_use = w_map.get(scenario_id, W_EXPERT)
+    w_use = w_use / w_use.sum()
+
+    # TOPSIS vùng - chuyên gia
+    c_expert, rank_expert = topsis(REGION_MATRIX, w_use, REGION_IS_BENEFIT)
+
+    # TOPSIS vùng - Entropy
+    w_entropy = entropy_weights(REGION_MATRIX)
+    c_entropy, rank_entropy = topsis(REGION_MATRIX, w_entropy, REGION_IS_BENEFIT)
+
+    # Priority ngành
+    priority_scores, priority_rank = compute_priority(SECTOR_MATRIX, W_PRIORITY)
+
+    if verbose:
+        print(f"[M2] Đánh giá sẵn sàng số (kịch bản {scenario_id})")
+        print("  Xếp hạng TOPSIS 6 vùng (trọng số chuyên gia):")
+        for r in range(1, 7):
+            idx = np.where(rank_expert == r)[0][0]
+            print(f"    #{r} {REGION_SHORT[idx]:<12} C*={c_expert[idx]:.4f}  "
+                  f"Digital={REGION_MATRIX[idx,2]:.0f}  AI={REGION_MATRIX[idx,3]:.0f}")
+        print("  Top-3 ngành ưu tiên (Priority index):")
+        for r in range(1, 4):
+            idx = np.where(priority_rank == r)[0][0]
+            print(f"    #{r} {SECTOR_NAMES[idx]:<25} Priority={priority_scores[idx]:.4f}")
+
+    return {
+        'region_topsis_expert' : c_expert,
+        'region_rank_expert'   : rank_expert,
+        'region_topsis_entropy': c_entropy,
+        'region_rank_entropy'  : rank_entropy,
+        'w_entropy'            : w_entropy,
+        'priority_scores'      : priority_scores,
+        'priority_rank'        : priority_rank,
+        'region_matrix'        : REGION_MATRIX,
+        'region_names'         : REGION_NAMES,
+        'region_short'         : REGION_SHORT,
+        'sector_names'         : SECTOR_NAMES,
+        'sector_short'         : SECTOR_SHORT,
+    }
+
+
+if __name__ == '__main__':
+    run_m2(verbose=True)
