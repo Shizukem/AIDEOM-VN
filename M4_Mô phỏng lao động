@@ -1,0 +1,180 @@
+import numpy as np
+
+SECTOR_NAMES = [
+    'Nông-Lâm-Thủy sản', 'CN chế biến chế tạo', 'Xây dựng',
+    'Bán buôn-bán lẻ', 'Tài chính-Ngân hàng', 'Logistics-Vận tải',
+    'CNTT-Truyền thông', 'Giáo dục-Đào tạo',
+]
+SECTOR_SHORT = ['NLS','CBCT','XD','BBLR','TCNH','Logistics','CNTT','GD']
+N_SECTORS = 8
+
+LABOR  = np.array([13.20, 11.50, 4.80, 7.80, 0.55, 1.95, 0.62, 2.15])  # triệu người
+RISK   = np.array([18, 42, 25, 38, 52, 35, 28, 22]) / 100.0
+A1     = np.array([8.5,  32.5, 12.8, 22.4, 45.8, 28.5, 62.5, 18.5])
+B1     = np.array([45.0, 28.0, 35.0, 32.0, 22.0, 30.0, 20.0, 55.0])
+C1     = np.array([5.2,  62.4, 18.5, 48.2, 72.5, 42.8, 32.5, 12.5])
+D1     = np.array([50.0, 32.0, 42.0, 38.0, 26.0, 36.0, 24.0, 62.0])
+
+# Phân bổ ngân sách AI và H theo kịch bản (tỷ VND / ngành / năm)
+_SCENARIO_BUDGET = {
+    'S1': {'x_AI': np.array([300,500,200,300,100,200,100,100]),
+           'x_H' : np.array([400,600,300,400,100,200,100,400])},
+    'S2': {'x_AI': np.array([400,800,250,500,200,300,200,150]),
+           'x_H' : np.array([500,700,300,500,150,250,150,450])},
+    'S3': {'x_AI': np.array([300,1000,200,600,300,400,400,200]),
+           'x_H' : np.array([300,600,200,400,200,250,200,350])},
+    'S4': {'x_AI': np.array([200,400,150,300,100,200,100,100]),
+           'x_H' : np.array([800,1000,500,700,200,350,200,750])},
+    'S5': {'x_AI': np.array([350,700,220,420,180,280,200,130]),
+           'x_H' : np.array([550,750,380,520,140,270,150,490])},
+}
+
+
+def compute_netjob(x_AI, x_H):
+    """Tính NetJob theo 8 ngành."""
+    NewJob       = A1 * x_AI
+    UpgradeJob   = B1 * x_H
+    DisplacedJob = C1 * RISK * x_AI
+    RetrainCap   = D1 * x_H
+    NetJob       = NewJob + UpgradeJob - DisplacedJob
+    return {
+        'NewJob'      : NewJob,
+        'UpgradeJob'  : UpgradeJob,
+        'DisplacedJob': DisplacedJob,
+        'RetrainCap'  : RetrainCap,
+        'NetJob'      : NetJob,
+    }
+# Trạng thái: 0=Có việc làm truyền thống, 1=Có việc làm số/AI, 2=Thất nghiệp/đào tạo
+#
+# Ma trận chuyển đổi P[i,j] = xác suất từ trạng thái i → j
+# Phụ thuộc vào: mức độ AI đầu tư, ngân sách đào tạo
+
+def _build_markov(x_AI_total, x_H_total, risk_avg=0.35):
+    """
+    Xây dựng ma trận Markov 3×3 cho nền kinh tế.
+
+    Trạng thái: [Trad, Digital, Unemployed]
+    """
+    # Xác suất dịch chuyển phụ thuộc AI và H investment
+    ai_level = min(x_AI_total / 5000, 1.0)   # normalize [0,1]
+    h_level  = min(x_H_total  / 5000, 1.0)
+
+    # Từ Truyền thống
+    p_trad_to_dig  = 0.05 + 0.15 * h_level          # đào tạo lên kỹ năng số
+    p_trad_to_unem = 0.02 + 0.08 * ai_level * risk_avg  # bị thay thế
+    p_trad_stay    = 1 - p_trad_to_dig - p_trad_to_unem
+
+    # Từ Kỹ năng số
+    p_dig_to_trad  = 0.01                             # hiếm khi thoái lui
+    p_dig_to_unem  = 0.01 + 0.02 * ai_level           # ít rủi ro hơn
+    p_dig_stay     = 1 - p_dig_to_trad - p_dig_to_unem
+
+    # Từ Thất nghiệp/đào tạo
+    p_unem_to_dig  = 0.10 + 0.25 * h_level            # đào tạo lại thành công
+    p_unem_to_trad = 0.20 + 0.10 * (1 - h_level)      # quay lại việc làm truyền thống
+    p_unem_stay    = 1 - p_unem_to_dig - p_unem_to_trad
+
+    # Clip để đảm bảo xác suất hợp lệ
+    def normalize_row(p_stay, p1, p2):
+        vals = np.array([max(0, p_stay), max(0, p1), max(0, p2)])
+        return vals / vals.sum()
+
+    r0 = normalize_row(p_trad_stay, p_trad_to_dig, p_trad_to_unem)
+    r1 = normalize_row(p_dig_stay,  p_dig_to_trad, p_dig_to_unem)
+    r2 = normalize_row(p_unem_stay, p_unem_to_dig, p_unem_to_trad)
+
+    P = np.array([
+        [r0[0], r0[1], r0[2]],   # từ Trad
+        [r1[1], r1[0], r1[2]],   # từ Digital (reorder để [Trad, Dig, Unem])
+        [r2[1], r2[0], r2[2]],   # từ Unemployed
+    ])
+    return P
+
+
+def markov_forecast(x_AI_total, x_H_total, n_years=5, pi0=None):
+    """
+    Dự báo phân bổ lao động qua chuỗi Markov.
+
+    pi0 : phân bổ ban đầu [Trad%, Digital%, Unemployed%]
+    """
+    if pi0 is None:
+        # VN 2025: ~70% truyền thống, 20% kỹ năng số, 10% đang chuyển đổi
+        pi0 = np.array([0.70, 0.20, 0.10])
+
+    P = _build_markov(x_AI_total, x_H_total)
+    trajectory = [pi0]
+    pi = pi0.copy()
+    for _ in range(n_years):
+        pi = pi @ P
+        trajectory.append(pi.copy())
+
+    # Trạng thái dừng (steady state)
+    eigvals, eigvecs = np.linalg.eig(P.T)
+    ss_idx = np.argmin(np.abs(eigvals - 1.0))
+    steady = np.abs(eigvecs[:, ss_idx])
+    steady = steady / steady.sum()
+
+    return {
+        'trajectory': np.array(trajectory),
+        'steady'    : steady,
+        'P'         : P,
+    }
+
+
+def run_m4(scenario_id='S5', verbose=True):
+    """Chạy Module M4."""
+    budgets = _SCENARIO_BUDGET.get(scenario_id, _SCENARIO_BUDGET['S5'])
+    x_AI = budgets['x_AI']
+    x_H  = budgets['x_H']
+
+    job_result = compute_netjob(x_AI, x_H)
+
+    x_AI_total = x_AI.sum()
+    x_H_total  = x_H.sum()
+    markov_res = markov_forecast(x_AI_total, x_H_total, n_years=5)
+
+    total_net    = job_result['NetJob'].sum()
+    total_disp   = job_result['DisplacedJob'].sum()
+    total_new    = job_result['NewJob'].sum()
+    total_upg    = job_result['UpgradeJob'].sum()
+
+    # Dự báo theo năm: tích lũy tuyến tính
+    yearly_net = []
+    for t in range(1, 6):
+        scale = 1 + 0.05 * t     # đầu tư tích lũy
+        yearly_net.append(total_net * scale)
+    yearly_net = np.array(yearly_net)
+
+    if verbose:
+        print(f"[M4] Mô phỏng lao động (kịch bản {scenario_id})")
+        print(f"  Tổng NetJob ròng   : {total_net:>10,.0f} người")
+        print(f"  NewJob (AI mới)    : {total_new:>10,.0f} người")
+        print(f"  UpgradeJob (nâng)  : {total_upg:>10,.0f} người")
+        print(f"  DisplacedJob (mất) : {total_disp:>10,.0f} người")
+        print("  Phân bổ lao động Markov (trạng thái dừng):")
+        labels = ['Truyền thống','Kỹ năng số','Chuyển đổi/ĐT']
+        for lbl, val in zip(labels, markov_res['steady']):
+            print(f"    {lbl:<20}: {val*100:.1f}%")
+        print("  NetJob theo ngành (top 3):")
+        top3 = np.argsort(job_result['NetJob'])[::-1][:3]
+        for idx in top3:
+            print(f"    {SECTOR_NAMES[idx]:<24}: {job_result['NetJob'][idx]:>8,.0f}")
+
+    return {
+        'job_result'  : job_result,
+        'markov'      : markov_res,
+        'yearly_net'  : yearly_net,
+        'x_AI'        : x_AI,
+        'x_H'         : x_H,
+        'sector_names': SECTOR_NAMES,
+        'sector_short': SECTOR_SHORT,
+        'labor'       : LABOR,
+        'total_net'   : total_net,
+        'total_disp'  : total_disp,
+        'total_new'   : total_new,
+        'total_upg'   : total_upg,
+    }
+
+
+if __name__ == '__main__':
+    run_m4(verbose=True)
