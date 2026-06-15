@@ -1,0 +1,507 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy.optimize import linprog
+from typing import Dict, Tuple, List
+import warnings
+warnings.filterwarnings('ignore')
+class RiskAssessmentModule:
+    """
+    Module M5: Đánh giá Rủi ro
+    
+    Input: Budget allocation x_j,r, allocation strategy (S1-S5)
+    Output: Cyber Risk, Environmental Risk, Dependency Risk
+    
+    Dựa trên:
+    - Bài 7: f3(x) = environmental, f4(x) = cyber risk
+    - Bài 10: scenario-based risk analysis
+    """
+    
+    def __init__(self, regions: List[str], items: List[str], scenarios: Dict):
+        """
+        Parameters:
+        -----------
+        regions : list
+            6 vùng kinh tế VN: [1-Trung du, 2-RRD, 3-BCC, 4-TN, 5-DN, 6-MD]
+        items : list
+            4 hạng mục: ['I', 'D', 'AI', 'H'] (vốn vật chất, số, AI, nhân lực)
+        scenarios : dict
+            4 kịch bản: s1(Lạc quan), s2(Cơ sở), s3(Bi quan), s4(Khủng hoảng)
+        """
+        self.regions = regions
+        self.items = items
+        self.scenarios = scenarios
+        self.n_regions = len(regions)
+        self.n_items = len(items)
+        
+        # Risk coefficient matrices (Bài 7, 10)
+        self._init_risk_coefficients()
+        
+    def _init_risk_coefficients(self):
+        """Khởi tạo hệ số rủi ro từ bài 7 & 10"""
+        
+        # 1. CYBER RISK (ρr, σr từ Bài 7.3)
+        # ρr: hệ số rủi ro dữ liệu từ đầu tư AI
+        # σr: hệ số giảm rủi ro từ đầu tư H (nhân lực)
+        self.rho = np.array([0.18, 0.45, 0.28, 0.12, 0.52, 0.22])  # risk/AI
+        self.sigma = np.array([0.32, 0.28, 0.30, 0.35, 0.25, 0.30])  # mitigation/H
+        
+        # 2. ENVIRONMENTAL RISK (er từ Bài 7.3)
+        # er: cường độ phát thải CO2 theo vùng
+        self.emission_intensity = np.array([0.42, 0.55, 0.48, 0.32, 0.62, 0.38])
+        
+        # 3. DEPENDENCY RISK (phụ thuộc vào các kỹ năng, chuỗi cung ứng)
+        # Hệ số phụ thuộc công nghệ nước ngoài
+        self.tech_dependency = np.array([0.65, 0.72, 0.58, 0.70, 0.75, 0.62])
+        
+        # 4. SCENARIO ADJUSTMENTS (từ Bài 10.4)
+        # Điều chỉnh hệ số theo kịch bản
+        self.scenario_multipliers = {
+            's1_optimistic': {'cyber': 0.80, 'env': 0.90, 'dep': 0.75},
+            's2_baseline': {'cyber': 1.00, 'env': 1.00, 'dep': 1.00},
+            's3_pessimistic': {'cyber': 1.30, 'env': 1.15, 'dep': 1.20},
+            's4_crisis': {'cyber': 1.60, 'env': 1.40, 'dep': 1.50}
+        }
+        
+        # 5. CORRELATION MATRIX - các loại rủi ro không độc lập
+        # Cyber + Env có tương quan âm (H giảm cyber, cũng tốt cho môi trường)
+        self.risk_correlation = np.array([
+            [1.00, -0.35, 0.45],      # cyber vs env, dep
+            [-0.35, 1.00, 0.30],      # env vs cyber, dep
+            [0.45, 0.30, 1.00]        # dep vs cyber, env
+        ])
+    
+    def calculate_cyber_risk(self, x: np.ndarray, scenario: str = 's2_baseline') -> float:
+        """
+        Tính Cyber Risk theo Bài 7: f4(x) = Σρr·x_AI,r - Σσr·x_H,r
+        
+        x: mảng (n_regions, n_items) = ngân sách phân bổ
+        scenario: kịch bản điều chỉnh hệ số
+        
+        Return: cyber risk score (thấp hơn tốt hơn)
+        """
+        x = np.array(x).reshape(self.n_regions, self.n_items)
+        
+        # x_AI (index=2), x_H (index=3)
+        x_AI = x[:, 2]
+        x_H = x[:, 3]
+        
+        # Cyber risk = tác động AI - giảm thiểu từ H
+        cyber_raw = np.dot(self.rho, x_AI) - np.dot(self.sigma, x_H)
+        
+        # Điều chỉnh theo kịch bản
+        multiplier = self.scenario_multipliers[scenario]['cyber']
+        cyber_risk = cyber_raw * multiplier
+        
+        # Normalize về thang [0, 100]
+        cyber_risk_normalized = np.clip(cyber_risk / 500.0 * 100, 0, 100)
+        
+        return cyber_risk_normalized
+    
+    def calculate_environmental_risk(self, x: np.ndarray, scenario: str = 's2_baseline') -> float:
+        """
+        Tính Environmental Risk theo Bài 7: f3(x) = Σer·(x_I,r + x_AI,r)
+        
+        x: mảng (n_regions, n_items)
+        scenario: kịch bản điều chỉnh
+        
+        Return: environmental risk score (phát thải gián tiếp)
+        """
+        x = np.array(x).reshape(self.n_regions, self.n_items)
+        
+        # x_I (index=0), x_AI (index=2)
+        x_I = x[:, 0]
+        x_AI = x[:, 2]
+        
+        # Phát thải = cường độ × (đầu tư hạ tầng + AI)
+        emission_raw = np.dot(self.emission_intensity, x_I + x_AI)
+        
+        # Điều chỉnh theo kịch bản
+        multiplier = self.scenario_multipliers[scenario]['env']
+        env_risk = emission_raw * multiplier
+        
+        # Normalize về thang [0, 100]
+        env_risk_normalized = np.clip(env_risk / 3000.0 * 100, 0, 100)
+        
+        return env_risk_normalized
+    
+    def calculate_dependency_risk(self, x: np.ndarray, scenario: str = 's2_baseline') -> float:
+        """
+        Tính Dependency Risk (phụ thuộc công nghệ nước ngoài)
+        
+        Giả định: phụ thuộc = f(x_AI, x_D) - f(x_H)
+        Lý do: AI/D nhập khẩu nhiều, H giúp độc lập hóa
+        
+        x: mảng (n_regions, n_items)
+        scenario: kịch bản
+        
+        Return: dependency risk score
+        """
+        x = np.array(x).reshape(self.n_regions, self.n_items)
+        
+        # x_D (index=1), x_AI (index=2), x_H (index=3)
+        x_D = x[:, 1]
+        x_AI = x[:, 2]
+        x_H = x[:, 3]
+        
+        # Dependency risk = tác động nhập khẩu - độc lập hóa từ H
+        dep_raw = 0.7 * np.dot(self.tech_dependency, x_AI) + \
+                  0.3 * np.dot(self.tech_dependency, x_D) - \
+                  0.5 * np.sum(x_H)
+        
+        # Điều chỉnh theo kịch bản
+        multiplier = self.scenario_multipliers[scenario]['dep']
+        dep_risk = dep_raw * multiplier
+        
+        # Normalize
+        dep_risk_normalized = np.clip(dep_risk / 2000.0 * 100, 0, 100)
+        
+        return dep_risk_normalized
+    
+    def calculate_composite_risk(self, x: np.ndarray, scenario: str = 's2_baseline',
+                                 weights: Tuple[float, float, float] = (0.35, 0.35, 0.30)) -> float:
+        """
+        Tính tổng chỉ số rủi ro (Risk Composite Score)
+        
+        Trọng số: Cyber 35%, Environmental 35%, Dependency 30%
+        Điều chỉnh tương quan giữa các loại rủi ro
+        
+        x: mảng (n_regions, n_items)
+        scenario: kịch bản
+        weights: (w_cyber, w_env, w_dep)
+        
+        Return: composite risk [0-100]
+        """
+        cyber = self.calculate_cyber_risk(x, scenario)
+        env = self.calculate_environmental_risk(x, scenario)
+        dep = self.calculate_dependency_risk(x, scenario)
+        
+        risk_vector = np.array([cyber, env, dep])
+        
+        # Trọng số không tương quan
+        composite = weights[0] * cyber + weights[1] * env + weights[2] * dep
+        
+        # Điều chỉnh tương quan (nếu cyber thấp, risk tổng cộng sẽ thấp hơn)
+        correlation_adjustment = np.dot(weights, np.dot(self.risk_correlation, risk_vector)) * 0.05
+        
+        composite = np.clip(composite - correlation_adjustment, 0, 100)
+        
+        return composite
+    
+    def scenario_analysis(self, x: np.ndarray) -> pd.DataFrame:
+        """
+        Phân tích rủi ro qua 4 kịch bản (từ Bài 10)
+        
+        x: mảng (n_regions, n_items)
+        
+        Return: DataFrame với cột [scenario, cyber_risk, env_risk, dep_risk, composite]
+        """
+        scenarios_list = ['s1_optimistic', 's2_baseline', 's3_pessimistic', 's4_crisis']
+        results = []
+        
+        for scen in scenarios_list:
+            cyber = self.calculate_cyber_risk(x, scen)
+            env = self.calculate_environmental_risk(x, scen)
+            dep = self.calculate_dependency_risk(x, scen)
+            comp = self.calculate_composite_risk(x, scen)
+            
+            results.append({
+                'Scenario': scen.replace('_', ' ').title(),
+                'Cyber Risk': cyber,
+                'Environmental Risk': env,
+                'Dependency Risk': dep,
+                'Composite Risk': comp
+            })
+        
+        return pd.DataFrame(results)
+    
+    def risk_by_region(self, x: np.ndarray, scenario: str = 's2_baseline') -> pd.DataFrame:
+        """
+        Phân tích rủi ro theo vùng (regional breakdown)
+        
+        x: mảng (n_regions, n_items)
+        scenario: kịch bản
+        
+        Return: DataFrame [region, cyber_contribution, env_contribution, dep_contribution]
+        """
+        x = np.array(x).reshape(self.n_regions, self.n_items)
+        
+        x_I = x[:, 0]
+        x_D = x[:, 1]
+        x_AI = x[:, 2]
+        x_H = x[:, 3]
+        
+        multiplier = self.scenario_multipliers[scenario]
+        
+        results = []
+        for r in range(self.n_regions):
+            cyber_r = (self.rho[r] * x_AI[r] - self.sigma[r] * x_H[r]) * multiplier['cyber']
+            env_r = self.emission_intensity[r] * (x_I[r] + x_AI[r]) * multiplier['env']
+            dep_r = (self.tech_dependency[r] * (0.7*x_AI[r] + 0.3*x_D[r]) - 0.5*x_H[r]) * multiplier['dep']
+            
+            results.append({
+                'Region': f'Region {r+1}',
+                'Cyber Contribution': np.clip(cyber_r / 100, 0, 100),
+                'Environmental Contribution': np.clip(env_r / 100, 0, 100),
+                'Dependency Contribution': np.clip(dep_r / 100, 0, 100)
+            })
+        
+        return pd.DataFrame(results)
+def generate_allocation_by_strategy(budget_total: float = 50000,
+                                   n_regions: int = 6) -> Dict[str, np.ndarray]:
+    """
+    Tạo phân bổ ngân sách theo 5 kịch bản chính sách
+    
+    Return: dict {strategy_name -> allocation array (n_regions, 4)}
+    """
+    allocations = {}
+    
+    # S1: Truyền thống (70% K, 10% mỗi loại)
+    s1 = np.random.uniform(0.6, 0.8, (n_regions, 4))
+    s1 = (s1 / s1.sum(axis=1, keepdims=True)) * budget_total / n_regions
+    s1 = s1 * np.array([0.70, 0.10, 0.10, 0.10]) / np.array([0.70, 0.10, 0.10, 0.10]).sum()
+    allocations['S1_Traditional'] = s1
+    
+    # S2: Số hóa nhanh (25% K, 45% D, 15% AI, 15% H)
+    s2 = np.ones((n_regions, 4)) * (budget_total / n_regions / 4)
+    s2 = s2 * np.array([0.25, 0.45, 0.15, 0.15]) / np.array([0.25, 0.45, 0.15, 0.15]).sum()
+    allocations['S2_Digital_Fast'] = s2
+    
+    # S3: AI dẫn dắt (20% K, 20% D, 45% AI, 15% H)
+    s3 = np.ones((n_regions, 4)) * (budget_total / n_regions / 4)
+    s3 = s3 * np.array([0.20, 0.20, 0.45, 0.15]) / np.array([0.20, 0.20, 0.45, 0.15]).sum()
+    allocations['S3_AI_Centric'] = s3
+    
+    # S4: Bao trùm số (30% K, 20% D, 10% AI, 40% H)
+    s4 = np.ones((n_regions, 4)) * (budget_total / n_regions / 4)
+    s4 = s4 * np.array([0.30, 0.20, 0.10, 0.40]) / np.array([0.30, 0.20, 0.10, 0.40]).sum()
+    allocations['S4_Inclusive'] = s4
+    
+    # S5: Tối ưu cân bằng (từ mô hình - mô phỏng)
+    s5 = np.ones((n_regions, 4)) * (budget_total / n_regions / 4)
+    s5 = s5 * np.array([0.35, 0.30, 0.20, 0.15]) / np.array([0.35, 0.30, 0.20, 0.15]).sum()
+    allocations['S5_Balanced_Optimal'] = s5
+    
+    return allocations
+def visualize_risk_analysis(risk_module: RiskAssessmentModule,
+                           allocations: Dict[str, np.ndarray],
+                           scenario: str = 's2_baseline') -> None:
+    """
+    Vẽ biểu đồ tổng hợp rủi ro qua 5 kịch bản
+    """
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    
+    risk_data = []
+    strategy_names = []
+    
+    for strategy, x in allocations.items():
+        cyber = risk_module.calculate_cyber_risk(x, scenario)
+        env = risk_module.calculate_environmental_risk(x, scenario)
+        dep = risk_module.calculate_dependency_risk(x, scenario)
+        comp = risk_module.calculate_composite_risk(x, scenario)
+        
+        risk_data.append({
+            'Cyber': cyber, 'Environmental': env, 'Dependency': dep, 'Composite': comp
+        })
+        strategy_names.append(strategy.replace('_', ' '))
+    
+    risk_df = pd.DataFrame(risk_data, index=strategy_names)
+    
+    # Biểu đồ 1: Cyber Risk
+    axes[0, 0].bar(strategy_names, risk_df['Cyber'], color='#FF6B6B', alpha=0.7)
+    axes[0, 0].set_title('Cyber Risk by Strategy', fontsize=12, fontweight='bold')
+    axes[0, 0].set_ylabel('Risk Score (0-100)')
+    axes[0, 0].tick_params(axis='x', rotation=45)
+    axes[0, 0].grid(axis='y', alpha=0.3)
+    
+    # Biểu đồ 2: Environmental Risk
+    axes[0, 1].bar(strategy_names, risk_df['Environmental'], color='#4ECDC4', alpha=0.7)
+    axes[0, 1].set_title('Environmental Risk by Strategy', fontsize=12, fontweight='bold')
+    axes[0, 1].set_ylabel('Risk Score (0-100)')
+    axes[0, 1].tick_params(axis='x', rotation=45)
+    axes[0, 1].grid(axis='y', alpha=0.3)
+    
+    # Biểu đồ 3: Dependency Risk
+    axes[1, 0].bar(strategy_names, risk_df['Dependency'], color='#FFD93D', alpha=0.7)
+    axes[1, 0].set_title('Dependency Risk by Strategy', fontsize=12, fontweight='bold')
+    axes[1, 0].set_ylabel('Risk Score (0-100)')
+    axes[1, 0].tick_params(axis='x', rotation=45)
+    axes[1, 0].grid(axis='y', alpha=0.3)
+    
+    # Biểu đồ 4: Composite Risk (radar-style comparison)
+    axes[1, 1].plot(strategy_names, risk_df['Composite'], marker='o', linewidth=2.5,
+                    markersize=8, color='#6A0572', label='Composite Risk')
+    axes[1, 1].fill_between(range(len(strategy_names)), risk_df['Composite'], alpha=0.3, color='#6A0572')
+    axes[1, 1].set_title('Composite Risk Score', fontsize=12, fontweight='bold')
+    axes[1, 1].set_ylabel('Risk Score (0-100)')
+    axes[1, 1].tick_params(axis='x', rotation=45)
+    axes[1, 1].grid(True, alpha=0.3)
+    axes[1, 1].set_ylim(0, 100)
+    
+    plt.tight_layout()
+    plt.savefig('m5_risk_analysis.png', dpi=300, bbox_inches='tight')
+    plt.show()
+    
+    # In bảng kết quả
+    print("\n" + "="*70)
+    print("RISK ASSESSMENT MODULE M5 - COMPOSITE RESULTS")
+    print("="*70)
+    print(f"\nScenario: {scenario.replace('_', ' ').title()}\n")
+    print(risk_df.to_string())
+    print("\nNote: Lower risk scores are better (0=safest, 100=riskiest)")
+
+
+def create_risk_heatmap(risk_module: RiskAssessmentModule,
+                       allocations: Dict[str, np.ndarray]) -> None:
+    """
+    Heatmap so sánh 3 loại rủi ro qua 5 kịch bản & 4 kịch bản kinh tế
+    """
+    scenarios = ['s1_optimistic', 's2_baseline', 's3_pessimistic', 's4_crisis']
+    
+    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+    
+    risk_types = ['Cyber', 'Environmental', 'Dependency']
+    
+    for idx, risk_type in enumerate(risk_types):
+        heatmap_data = []
+        
+        for scen in scenarios:
+            row = []
+            for strategy, x in allocations.items():
+                if risk_type == 'Cyber':
+                    risk_val = risk_module.calculate_cyber_risk(x, scen)
+                elif risk_type == 'Environmental':
+                    risk_val = risk_module.calculate_environmental_risk(x, scen)
+                else:
+                    risk_val = risk_module.calculate_dependency_risk(x, scen)
+                row.append(risk_val)
+            heatmap_data.append(row)
+        
+        heatmap_df = pd.DataFrame(
+            heatmap_data,
+            index=[s.replace('_', ' ').title() for s in scenarios],
+            columns=[s.replace('_', ' ') for s in allocations.keys()]
+        )
+        
+        sns.heatmap(heatmap_df, annot=True, fmt='.1f', cmap='RdYlGn_r',
+                    ax=axes[idx], cbar_kws={'label': 'Risk Score'}, vmin=0, vmax=100)
+        axes[idx].set_title(f'{risk_type} Risk Heatmap', fontsize=12, fontweight='bold')
+        axes[idx].tick_params(axis='x', rotation=45)
+        axes[idx].tick_params(axis='y', rotation=0)
+    
+    plt.tight_layout()
+    plt.savefig('m5_risk_heatmap.png', dpi=300, bbox_inches='tight')
+    plt.show()
+def export_risk_results(risk_module: RiskAssessmentModule,
+                       allocations: Dict[str, np.ndarray],
+                       output_file: str = 'M5_Risk_Results.csv') -> pd.DataFrame:
+    """
+    Xuất bảng tổng hợp rủi ro đầy đủ - có thể dùng cho M6 (Dashboard)
+    """
+    all_results = []
+    
+    scenarios = ['s1_optimistic', 's2_baseline', 's3_pessimistic', 's4_crisis']
+    
+    for strategy, x in allocations.items():
+        for scen in scenarios:
+            cyber = risk_module.calculate_cyber_risk(x, scen)
+            env = risk_module.calculate_environmental_risk(x, scen)
+            dep = risk_module.calculate_dependency_risk(x, scen)
+            comp = risk_module.calculate_composite_risk(x, scen)
+            
+            all_results.append({
+                'Policy_Strategy': strategy,
+                'Economic_Scenario': scen,
+                'Cyber_Risk': round(cyber, 2),
+                'Environmental_Risk': round(env, 2),
+                'Dependency_Risk': round(dep, 2),
+                'Composite_Risk': round(comp, 2),
+                'Risk_Level': 'CRITICAL' if comp >= 75 else 'HIGH' if comp >= 50 else 'MEDIUM' if comp >= 30 else 'LOW'
+            })
+    
+    results_df = pd.DataFrame(all_results)
+    results_df.to_csv(output_file, index=False)
+    
+    print(f"\nRisk results exported to {output_file}")
+    return results_df
+
+def main():
+    """Main execution - chạy Module M5 đầy đủ"""
+    
+    print("\n" + "="*80)
+    print("MODULE M5: ĐÁNH GIÁ RỦI RO (Risk Assessment Module)")
+    print("AIDEOM-VN Integration - Bài 12 Đồ án tích hợp")
+    print("="*80)
+    
+    # Khởi tạo module
+    regions = ['Region_1_MountainNorth', 'Region_2_RRD', 'Region_3_CCentral',
+               'Region_4_Highland', 'Region_5_Southeast', 'Region_6_Mekong']
+    items = ['I_Infrastructure', 'D_Digitalization', 'AI_Capacity', 'H_HumanCapital']
+    scenarios_def = {'s1': 0.30, 's2': 0.45, 's3': 0.20, 's4': 0.05}
+    
+    risk_module = RiskAssessmentModule(regions, items, scenarios_def)
+    
+    print("\n[STEP 1] Risk Parameters Initialized")
+    print(f"  - Regions: {len(regions)}")
+    print(f"  - Investment Items: {len(items)}")
+    print(f"  - Economic Scenarios: 4")
+    print(f"  - Risk Types: Cyber | Environmental | Dependency")
+    
+    # Tạo allocation cho 5 kịch bản chính sách
+    allocations = generate_allocation_by_strategy(budget_total=50000, n_regions=6)
+    
+    print("\n[STEP 2] Policy Strategies Allocation Generated")
+    for strat, x in allocations.items():
+        total_budget = x.sum()
+        print(f"  - {strat}: {total_budget:,.0f} (6 regions)")
+    
+    # Phân tích scenario
+    print("\n[STEP 3] Scenario-Based Risk Analysis")
+    print("  Analyzing baseline scenario (s2_baseline)...")
+    scenario_results = risk_module.scenario_analysis(allocations['S2_Digital_Fast'])
+    print(scenario_results.to_string(index=False))
+    
+    # Phân tích theo vùng
+    print("\n[STEP 4] Regional Risk Breakdown (S2_Digital_Fast strategy)")
+    regional_results = risk_module.risk_by_region(allocations['S2_Digital_Fast'])
+    print(regional_results.to_string(index=False))
+    
+    # Visualize
+    print("\n[STEP 5] Generating Visualizations...")
+    visualize_risk_analysis(risk_module, allocations, scenario='s2_baseline')
+    create_risk_heatmap(risk_module, allocations)
+    
+    # Export
+    print("\n[STEP 6] Exporting Results...")
+    results_df = export_risk_results(risk_module, allocations)
+    
+    # Summary statistics
+    print("\n[STEP 7] Summary Statistics")
+    print("\nComposite Risk Summary (All Strategies, Baseline Scenario):")
+    summary_data = []
+    for strategy, x in allocations.items():
+        comp_risk = risk_module.calculate_composite_risk(x, 's2_baseline')
+        summary_data.append({'Strategy': strategy, 'Composite_Risk': round(comp_risk, 2)})
+    
+    summary_df = pd.DataFrame(summary_data)
+    print(summary_df.to_string(index=False))
+    
+    # Recommendation
+    min_risk_idx = summary_df['Composite_Risk'].idxmin()
+    max_risk_idx = summary_df['Composite_Risk'].idxmax()
+    
+    print("\n" + "="*80)
+    print("RECOMMENDATIONS (Baseline Scenario):")
+    print("="*80)
+    print(f"✓ LOWEST RISK Strategy: {summary_df.loc[min_risk_idx, 'Strategy']}")
+    print(f"  - Composite Risk Score: {summary_df.loc[min_risk_idx, 'Composite_Risk']}")
+    print(f"\n✗ HIGHEST RISK Strategy: {summary_df.loc[max_risk_idx, 'Strategy']}")
+    print(f"  - Composite Risk Score: {summary_df.loc[max_risk_idx, 'Composite_Risk']}")
+    
+    print("\nNote: Module M5 is ready for integration with M1-M4 and M6 (Dashboard)")
+    print("="*80 + "\n")
+    
+    return risk_module, allocations, results_df
+if __name__ == "__main__":
+    risk_module, allocations, results = main()
